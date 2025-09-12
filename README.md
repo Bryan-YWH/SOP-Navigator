@@ -131,12 +131,6 @@ python refine_chunks.py "your_sop_document.csv" "your_sop_document_refined.csv"
 
 MIT License - 详见 LICENSE 文件
 
-## 联系方式
-
-- 项目维护者: Bryan-WH
-- 邮箱: [your-email@example.com]
-- GitHub: [https://github.com/Bryan-WH/SOP-Navigator](https://github.com/Bryan-WH/SOP-Navigator)
-
 ---
 
 **注意**: 本项目仅包含处理工具和脚本，不包含任何公司敏感文档或数据。所有SOP文档处理均在本地进行，确保数据安全。

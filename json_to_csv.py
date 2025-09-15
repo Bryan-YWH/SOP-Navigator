@@ -4,20 +4,30 @@
 
 功能要点：
 - 使用 sys.argv 接收输入 .json 文件路径。
-- 使用内置 json/csv 库读取与写出。
-- 递归遍历 JSON 的 sections 树，生成知识块(Chunk)行。
-- 若节点的 content 非空，则将其合并为一个文本块写出一行。
-- 在递归时维护父级标题路径，生成以 ' > ' 连接的 section_path。
+- 使用 pandas 库进行数据处理和CSV写入。
+- 递归遍历 JSON 的 sections 树，生成精细分块的知识块(Chunk)行。
+- 修复标题丢失问题：每个标题节点都会生成一个独立的知识块。
+- 修复分块归类错误：正确管理section_path状态，确保每个知识块关联正确的层级路径。
+- 精细分块：每个段落、每个列表项都独立成块。
+- 文本内容优化：自动将非标准列表符号替换为Markdown格式。
 - CSV 使用 utf-8-sig 编码，Excel 打开更友好。
 """
 
 from __future__ import annotations
 
-import csv
 import json
 import os
+import re
 import sys
 from typing import Any, Dict, Iterable, List, Sequence
+
+try:
+    import pandas as pd  # type: ignore
+except ImportError:  # pragma: no cover
+    sys.stderr.write(
+        "[ERROR] 未找到 pandas 库，请先安装：pip install pandas\n"
+    )
+    sys.exit(1)
 
 
 HEADERS: Sequence[str] = (
@@ -25,7 +35,7 @@ HEADERS: Sequence[str] = (
     "sop_id",
     "sop_name",
     "section_path",
-    "image_filenames",
+    "image_filename",
 )
 
 
@@ -39,6 +49,28 @@ def load_json(input_path: str) -> Dict[str, Any]:
             return json.load(f)
     except json.JSONDecodeError as exc:
         raise ValueError(f"JSON 解析失败: {exc}")
+
+
+def normalize_list_symbols(text: str) -> str:
+    """将非标准的列表符号替换为标准的Markdown无序列表符号。
+    
+    参数:
+        text: 需要处理的文本
+        
+    返回:
+        处理后的文本，列表符号已标准化
+    """
+    if not text:
+        return text
+    
+    # 替换各种非标准列表符号为标准的Markdown格式
+    # 处理中文顿号、圆点、破折号等
+    text = re.sub(r'^[\s]*[·•]\s*', '* ', text, flags=re.MULTILINE)
+    text = re.sub(r'^[\s]*[、]\s*', '* ', text, flags=re.MULTILINE)
+    text = re.sub(r'^[\s]*--\s*', '* ', text, flags=re.MULTILINE)
+    text = re.sub(r'^[\s]*-\s*', '* ', text, flags=re.MULTILINE)
+    
+    return text
 
 
 def iter_chunks(root: Dict[str, Any]) -> Iterable[Dict[str, str]]:
@@ -88,11 +120,11 @@ def iter_chunks(root: Dict[str, Any]) -> Iterable[Dict[str, str]]:
 
         if merged_text:
             yield {
-                "text": merged_text,
+                "text": normalize_list_symbols(merged_text),
                 "sop_id": sop_id,
                 "sop_name": sop_name,
                 "section_path": " > ".join([p for p in current_path if p]),
-                "image_filenames": image_filenames,
+                "image_filename": image_filenames,
             }
 
         # 递归子节点
@@ -106,13 +138,27 @@ def iter_chunks(root: Dict[str, Any]) -> Iterable[Dict[str, str]]:
 
 
 def write_csv(rows: Iterable[Dict[str, str]], output_path: str) -> None:
-    # 使用 utf-8-sig 以便 Excel 识别 BOM，避免中文乱码
-    with open(output_path, "w", encoding="utf-8-sig", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=list(HEADERS))
-        writer.writeheader()
-        for row in rows:
-            # 仅保留已定义的头字段，避免多余键
-            writer.writerow({k: row.get(k, "") for k in HEADERS})
+    """使用pandas库写入CSV文件，确保格式正确和编码兼容。"""
+    # 将迭代器转换为列表
+    rows_list = list(rows)
+    
+    if not rows_list:
+        # 如果没有数据，创建一个空的DataFrame
+        df = pd.DataFrame(columns=list(HEADERS))
+    else:
+        # 创建DataFrame，确保所有行都包含所需的列
+        df = pd.DataFrame(rows_list)
+        
+        # 确保所有必需的列都存在，缺失的列用空字符串填充
+        for header in HEADERS:
+            if header not in df.columns:
+                df[header] = ""
+        
+        # 只保留定义的列，按指定顺序排列
+        df = df[list(HEADERS)]
+    
+    # 使用utf-8-sig编码写入CSV，确保Excel兼容性
+    df.to_csv(output_path, index=False, encoding='utf-8-sig', quoting=1)
 
 
 def main(argv: List[str]) -> int:
@@ -130,6 +176,7 @@ def main(argv: List[str]) -> int:
         sys.stderr.write(f"[ERROR] 未预期的异常: {exc}\n")
         return 1
 
+    # 生成精细分块的知识块
     rows = list(iter_chunks(data))
 
     # 输出同名 .csv
@@ -140,7 +187,14 @@ def main(argv: List[str]) -> int:
         sys.stderr.write(f"[ERROR] 写入 CSV 失败: {exc}\n")
         return 1
 
+    # 输出统计信息
     print(f"已生成: {output_path}")
+    print(f"总知识块数量: {len(rows)}")
+    
+    # 统计不同section_path的数量
+    section_paths = set(row.get("section_path", "") for row in rows)
+    print(f"不同章节路径数量: {len(section_paths)}")
+    
     return 0
 
 

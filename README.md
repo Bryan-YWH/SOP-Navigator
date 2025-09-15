@@ -8,7 +8,7 @@
 
 ## 核心功能
 
-### 1. 一体化处理 (`process_sop_to_csv.py`) - 推荐使用
+### 1. 一体化处理 (`process_sop_with_images.py`) - 推荐使用
 - **一站式处理**: 直接从Word文档生成精炼的CSV文件
 - **智能标题识别**: 三级优先序检测（样式→数字编号→关键词）
 - **精确表格归属**: 根据表格内容特征自动识别归属章节
@@ -39,13 +39,14 @@
 
 ```
 SOP-Navigator/
-├── process_sop_to_csv.py   # 一体化处理脚本（推荐）
-├── word_to_json.py         # Word文档转JSON
-├── json_to_csv.py          # JSON转CSV
-├── refine_chunks.py        # 文本块精炼
-├── .gitignore             # Git忽略文件
-├── README.md              # 项目说明
-└── requirements.txt       # 依赖包列表
+├── process_sop_with_images.py  # 一体化处理脚本（推荐）
+├── process_sop_to_csv.py       # 基础处理脚本
+├── word_to_json.py             # Word文档转JSON
+├── json_to_csv.py              # JSON转CSV
+├── refine_chunks.py            # 文本块精炼
+├── .gitignore                  # Git忽略文件
+├── README.md                   # 项目说明
+└── requirements.txt            # 依赖包列表
 ```
 
 ## 技术栈
@@ -72,8 +73,8 @@ pip install docx2python pandas
 ### 1. 一体化处理（推荐）
 
 ```bash
-# 一步完成：Word文档 → 精炼CSV
-python process_sop_to_csv.py "your_sop_document.docx"
+# 一步完成：Word文档 → 精炼CSV（包含图片处理）
+python process_sop_with_images.py "your_sop_document.docx"
 ```
 
 ### 2. 分步处理流程
@@ -91,7 +92,7 @@ python refine_chunks.py "your_sop_document.csv" "your_sop_document_refined.csv"
 
 ### 3. 输出文件说明
 
-- **一体化处理输出**: `your_sop_document_processed.csv` - 直接可用的精炼CSV文件
+- **一体化处理输出**: `your_sop_document_processed_with_images.csv` - 直接可用的完整CSV文件
 - **分步处理输出**:
   - **JSON文件**: 包含完整的文档结构和元数据
   - **CSV文件**: 扁平化的知识块，适合导入RAG系统

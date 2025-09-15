@@ -45,19 +45,324 @@ def clean_text_content(text: str) -> str:
     return text
 
 
-def split_text_by_headers(text: str) -> List[Tuple[str, str]]:
+def identify_table_section(table_content: str) -> str:
     """
-    根据标题拆分文本内容。
-    支持多种标题格式：
+    根据表格内容识别表格应该归属的章节。
+    
+    参数:
+        table_content: 表格内容
+        
+    返回:
+        表格应该归属的章节名称
+    """
+    # 根据表格内容特征判断归属章节
+    if "分类" in table_content and "危险源" in table_content and "控制措施" in table_content:
+        return "3.1 风险识别"
+    elif "相关模块" in table_content and "危险源" in table_content and "控制措施" in table_content:
+        return "3.2 关键控制点"
+    elif "成品库保管员" in table_content and "成品库班长" in table_content and "SOP撰写" in table_content:
+        return "5.职责"
+    elif "本SOP涉及到的主要KPI" in table_content and "PI" in table_content:
+        return "6.定义和缩写"
+    elif "版本" in table_content and "作者" in table_content and "日期" in table_content:
+        return "8.历史文件记录"
+    elif "仓库利用率" in table_content and "劳动生产率" in table_content:
+        return "6.定义和缩写"
+    elif "PPE矩阵" in table_content and "风险评估" in table_content:
+        return "3.2 关键控制点"
+    elif "应急方案" in table_content and "成品酒高空坠落" in table_content:
+        return "3.2 关键控制点"
+    else:
+        return "未知章节"
+
+
+def split_text_by_headers_and_tables(text: str, section_path: str = "") -> List[Tuple[str, str]]:
+    """
+    根据标题和表格拆分文本内容。
+    支持多种标题格式和表格识别：
     1. Markdown格式：## 标题 或 ### 标题
     2. 数字编号格式：3.1 标题、3.2.1 标题 等
     3. 括号编号格式：1) 标题、2) 标题 等
+    4. 纯数字标题：8.历史文件记录
+    5. 表格识别：以 | 开头的Markdown表格
     
     参数:
         text: 原始文本内容
+        section_path: 当前文本所在的section路径
         
     返回:
         包含(标题, 内容)元组的列表
+    """
+    if not text:
+        return []
+    
+    # 检查是否整个文本就是一个表格
+    if re.match(r'^\|.*\|', text.strip()):
+        # 整个文本就是一个表格
+        table_section = identify_table_section(text)
+        table_header = table_section + " - 表格"
+        return [(table_header, text)]
+    
+    # 检查是否包含表格内容
+    if '|' in text and '---' in text:
+        # 包含表格内容，需要拆分
+        # 使用更简单的方法：直接按表格拆分
+        result_chunks = split_tables_simple(text)
+        return result_chunks
+    
+    # 如果不是纯表格，则按标题拆分
+    chunks = split_text_by_headers_only(text)
+    
+    # 检查拆分后的chunks中是否有表格，如果有则重新处理
+    result_chunks = []
+    for header, content in chunks:
+        if re.match(r'^\|.*\|', content.strip()):
+            # 这是一个表格chunk，根据内容识别归属章节
+            table_section = identify_table_section(content)
+            table_header = table_section + " - 表格"
+            result_chunks.append((table_header, content))
+        else:
+            result_chunks.append((header, content))
+    
+    return result_chunks
+
+
+def split_tables_simple(text: str) -> List[Tuple[str, str]]:
+    """
+    使用改进的方法拆分包含多个表格的文本。
+    确保每个表格都被识别为一个完整的chunk。
+    """
+    chunks = []
+    
+    # 首先按标题拆分
+    header_chunks = split_text_by_headers_only(text)
+    
+    for header, content in header_chunks:
+        # 检查内容是否包含表格
+        if '|' in content and '---' in content:
+            # 使用更简单的方法：按连续表格行分组
+            lines = content.split('\n')
+            tables = []
+            current_table = []
+            remaining_lines = []
+            
+            for line in lines:
+                line_stripped = line.strip()
+                # 检查是否为表格行
+                is_table_line = (line_stripped.startswith('|') and 
+                               line_stripped.endswith('|') and 
+                               line_stripped.count('|') >= 2)
+                
+                if is_table_line:
+                    current_table.append(line)
+                else:
+                    if current_table:
+                        # 完成当前表格
+                        table_text = '\n'.join(current_table).strip()
+                        if table_text:
+                            tables.append(table_text)
+                        current_table = []
+                    remaining_lines.append(line)
+            
+            # 处理最后的表格
+            if current_table:
+                table_text = '\n'.join(current_table).strip()
+                if table_text:
+                    tables.append(table_text)
+            
+            if tables:
+                # 添加剩余内容（如果有）
+                if remaining_lines:
+                    remaining_content = '\n'.join(remaining_lines).strip()
+                    if remaining_content:
+                        chunks.append((header, remaining_content))
+                
+                # 为每个表格创建独立的chunk
+                for table in tables:
+                    table_section = identify_table_section(table)
+                    table_header = table_section + " - 表格"
+                    chunks.append((table_header, table))
+            else:
+                chunks.append((header, content))
+        else:
+            chunks.append((header, content))
+    
+    return chunks
+
+
+def split_tables_by_regex(text: str) -> List[Tuple[str, str]]:
+    """
+    使用正则表达式拆分包含多个表格的文本。
+    """
+    chunks = []
+    
+    # 首先按标题拆分
+    header_chunks = split_text_by_headers_only(text)
+    
+    for header, content in header_chunks:
+        # 检查内容是否包含表格
+        if '|' in content and '---' in content:
+            # 使用更精确的正则表达式匹配完整的表格
+            # 表格模式：以|开头和结尾的行，包含分隔符行，直到遇到非表格行
+            lines = content.split('\n')
+            current_table = []
+            in_table = False
+            remaining_lines = []
+            
+            for line in lines:
+                line_stripped = line.strip()
+                # 检查是否为表格行
+                is_table_line = (line_stripped.startswith('|') and 
+                               line_stripped.endswith('|') and 
+                               line_stripped.count('|') >= 2)
+                
+                if is_table_line:
+                    if not in_table:
+                        # 开始新表格
+                        in_table = True
+                        current_table = []
+                    current_table.append(line)
+                else:
+                    if in_table:
+                        # 表格结束，保存表格
+                        if current_table:
+                            table_text = '\n'.join(current_table).strip()
+                            if table_text:
+                                table_section = identify_table_section(table_text)
+                                table_header = table_section + " - 表格"
+                                chunks.append((table_header, table_text))
+                        in_table = False
+                        current_table = []
+                    remaining_lines.append(line)
+            
+            # 处理最后的表格
+            if in_table and current_table:
+                table_text = '\n'.join(current_table).strip()
+                if table_text:
+                    table_section = identify_table_section(table_text)
+                    table_header = table_section + " - 表格"
+                    chunks.append((table_header, table_text))
+            
+            # 添加剩余内容（如果有）
+            if remaining_lines:
+                remaining_content = '\n'.join(remaining_lines).strip()
+                if remaining_content:
+                    chunks.append((header, remaining_content))
+        else:
+            chunks.append((header, content))
+    
+    return chunks
+
+
+def split_text_with_tables(text: str) -> List[Tuple[str, str]]:
+    """
+    拆分包含表格的文本，将每个表格作为独立的chunk。
+    """
+    lines = text.split('\n')
+    chunks = []
+    current_chunk = []
+    current_header = None
+    in_table = False
+    table_lines = []
+    
+    for line in lines:
+        line_stripped = line.strip()
+        
+        # 检查是否为表格行
+        is_table_line = (line_stripped.startswith('|') and 
+                        line_stripped.endswith('|') and 
+                        line_stripped.count('|') >= 2)
+        
+        # 检查是否为标题
+        is_header = False
+        header_text = None
+        
+        # 1. 检查Markdown格式标题
+        markdown_match = re.match(r'^(#{2,3})\s+(.+)$', line_stripped)
+        if markdown_match:
+            is_header = True
+            header_text = markdown_match.group(2).strip()
+        
+        # 2. 检查数字编号格式标题 (如 3.1、3.2.1、7.1.11 等)
+        elif re.match(r'^\d+\.\d+(\.\d+)*\s+', line_stripped):
+            is_header = True
+            header_text = line_stripped
+        
+        # 3. 检查括号编号格式标题 (如 1)、2)、3) 等)
+        elif re.match(r'^\d+\)\s+', line_stripped):
+            is_header = True
+            header_text = line_stripped
+        
+        # 4. 检查纯数字标题 (如 8.历史文件记录)
+        elif re.match(r'^\d+\.\s+', line_stripped):
+            is_header = True
+            header_text = line_stripped
+        
+        # 5. 检查纯数字标题（无空格，如 8.历史文件记录）
+        elif re.match(r'^\d+\.', line_stripped):
+            is_header = True
+            header_text = line_stripped
+        
+        # 处理表格逻辑
+        if is_table_line:
+            if not in_table:
+                # 开始新表格，先保存当前chunk
+                if current_chunk:
+                    chunk_text = '\n'.join(current_chunk).strip()
+                    if chunk_text:
+                        chunks.append((current_header, chunk_text))
+                    current_chunk = []
+                in_table = True
+                table_lines = []
+            table_lines.append(line)
+        else:
+            if in_table:
+                # 表格结束，保存表格作为独立chunk
+                if table_lines:
+                    table_text = '\n'.join(table_lines).strip()
+                    if table_text:
+                        # 根据表格内容识别归属章节
+                        table_section = identify_table_section(table_text)
+                        table_header = table_section + " - 表格"
+                        chunks.append((table_header, table_text))
+                in_table = False
+                table_lines = []
+            
+            if is_header:
+                # 如果当前有积累的内容，先保存
+                if current_chunk:
+                    chunk_text = '\n'.join(current_chunk).strip()
+                    if chunk_text:
+                        chunks.append((current_header, chunk_text))
+                    current_chunk = []
+                
+                # 设置新的标题
+                current_header = header_text
+                current_chunk.append(line)
+            else:
+                # 普通内容行
+                current_chunk.append(line)
+    
+    # 处理最后一块内容
+    if in_table and table_lines:
+        # 处理最后的表格
+        table_text = '\n'.join(table_lines).strip()
+        if table_text:
+            table_section = identify_table_section(table_text)
+            table_header = table_section + " - 表格"
+            chunks.append((table_header, table_text))
+    elif current_chunk:
+        # 处理最后的普通内容
+        chunk_text = '\n'.join(current_chunk).strip()
+        if chunk_text:
+            chunks.append((current_header, chunk_text))
+    
+    return chunks
+
+
+def split_text_by_headers_only(text: str) -> List[Tuple[str, str]]:
+    """
+    仅根据标题拆分文本内容（不处理表格）。
     """
     if not text:
         return []
@@ -90,16 +395,27 @@ def split_text_by_headers(text: str) -> List[Tuple[str, str]]:
             is_header = True
             header_text = line_stripped
         
+        # 4. 检查纯数字标题 (如 8.历史文件记录)
+        elif re.match(r'^\d+\.\s+', line_stripped):
+            is_header = True
+            header_text = line_stripped
+        
+        # 5. 检查纯数字标题（无空格，如 8.历史文件记录）
+        elif re.match(r'^\d+\.', line_stripped):
+            is_header = True
+            header_text = line_stripped
+        
         if is_header:
             # 如果当前有积累的内容，先保存
             if current_chunk:
                 chunk_text = '\n'.join(current_chunk).strip()
                 if chunk_text:
                     chunks.append((current_header, chunk_text))
+                current_chunk = []
             
-            # 开始新的块
+            # 设置新的标题
             current_header = header_text
-            current_chunk = [line]  # 包含标题行
+            current_chunk.append(line)
         else:
             # 普通内容行
             current_chunk.append(line)
@@ -125,8 +441,9 @@ def process_single_row(row: pd.Series) -> List[Dict[str, Any]]:
     """
     text_content = str(row['text']) if pd.notna(row['text']) else ''
     
-    # 拆分文本
-    chunks = split_text_by_headers(text_content)
+    # 拆分文本，传递section_path用于表格标题生成
+    section_path = str(row['section_path']) if pd.notna(row['section_path']) else ""
+    chunks = split_text_by_headers_and_tables(text_content, section_path)
     
     if not chunks:
         # 如果没有找到Markdown标题，返回原始行

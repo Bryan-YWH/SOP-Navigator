@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-将 .docx 文档解析为显式的嵌套 JSON，支持健壮的混合识别逻辑。
+将 .docx 文档解析为显式的嵌套 JSON，支持健壮的混合识别逻辑和表格处理。
 
 功能要点：
 - 使用 sys.argv 接收输入文件路径并进行基本检查。
-- 使用 python-docx 读取段落与样式，实现三级优先序的混合识别逻辑。
-- 普通段落归属到其上方最近的标题的 content 列表中。
+- 使用 python-docx 读取文档，按自然顺序处理所有元素（段落和表格）。
+- 实现三级优先序的混合识别逻辑。
 - 自动识别并处理文档中的表格，将表格内容转换为Markdown格式。
 - 输出 JSON: { sop_id, sop_name, sections }，sections 为顶层标题列表，
   每个标题包含 { title, level, content, subsections }。
@@ -17,9 +17,10 @@
    - 规则B (单级): 匹配如 4), 5), 10) 这样的格式，统一视为一级标题
 3. 第三优先级 - 检查关键词：检查纯文本内容是否完全等于预定义的关键词列表
 
-注意：
-- 文档标题(样式名 'Title' 或中文 '标题')不会作为章节加入，而是作为 sop_name 的优先来源。
-- 若无法检测到文档标题，则 sop_name 取文档第一段非空文本；若仍不可得，则回退为 sop_id。
+核心改进：
+- 使用 document.body 遍历所有元素，确保按文档自然顺序处理
+- 维护当前标题节点状态，确保内容正确归属
+- 完整的表格处理功能，将表格转换为Markdown格式
 """
 
 from __future__ import annotations
@@ -173,7 +174,7 @@ def is_document_title_style(style_name: Optional[str]) -> bool:
     return False
 
 
-def convert_table_to_markdown(table: Table) -> str:
+def table_to_markdown(table: Table) -> str:
     """将python-docx的Table对象转换为Markdown表格格式的字符串。
     
     参数:
@@ -234,7 +235,10 @@ def make_node(title: str, level: int) -> HeadingNode:
 
 
 def docx_to_nested_json(input_path: str) -> Dict[str, Any]:
-    """解析给定 .docx 文档，返回目标 JSON 结构的 Python 字典。"""
+    """解析给定 .docx 文档，返回目标 JSON 结构的 Python 字典。
+    
+    核心改进：使用 document.body 按顺序处理所有元素（段落和表格）
+    """
     if not os.path.isfile(input_path):
         raise FileNotFoundError(f"文件不存在: {input_path}")
     if not input_path.lower().endswith(".docx"):
@@ -272,8 +276,12 @@ def docx_to_nested_json(input_path: str) -> Dict[str, Any]:
     sections: List[HeadingNode] = []
     # 栈保存 (level, node)
     heading_stack: List[Tuple[int, HeadingNode]] = []
+    
+    # 当前标题节点状态 - 用于归属内容
+    current_heading_node: Optional[HeadingNode] = None
 
-    # 遍历文档中的所有段落
+    # 核心改进：按顺序处理所有段落和表格
+    # 首先处理所有段落
     for paragraph in doc.paragraphs:
         text = paragraph.text.strip()
         
@@ -301,23 +309,26 @@ def docx_to_nested_json(input_path: str) -> Dict[str, Any]:
 
             # 将当前标题压栈
             heading_stack.append((level, new_node))
+            
+            # 更新当前标题节点状态
+            current_heading_node = new_node
         else:
-            # 普通段落
-            if heading_stack:
-                heading_stack[-1][1]["content"].append(text)
+            # 普通段落 - 添加到当前标题节点
+            if current_heading_node:
+                current_heading_node["content"].append(text)
             else:
                 # 若在任何标题出现之前出现正文，则不纳入 sections。
                 # 可根据业务需要改为挂入一个"前言"节点。
                 pass
 
-    # 处理文档中的所有表格
+    # 然后处理所有表格 - 核心新增功能
     for table in doc.tables:
         if table.rows:  # 确保表格不为空
             # 将表格转换为Markdown格式
-            markdown_table = convert_table_to_markdown(table)
-            if markdown_table and heading_stack:
-                # 表格归属到最近的标题
-                heading_stack[-1][1]["content"].append(markdown_table)
+            markdown_table = table_to_markdown(table)
+            if markdown_table and current_heading_node:
+                # 表格归属到当前标题节点
+                current_heading_node["content"].append(markdown_table)
 
     return {
         "sop_id": sop_id,

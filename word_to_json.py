@@ -1,28 +1,21 @@
 #!/usr/bin/env python3
 """
-将 .docx 文档解析为显式的嵌套 JSON，支持混合识别逻辑。
+将 .docx 文档解析为显式的嵌套 JSON，支持健壮的混合识别逻辑。
 
 功能要点：
 - 使用 sys.argv 接收输入文件路径并进行基本检查。
-- 使用 python-docx 读取段落与样式，实现"数字编号为主，样式为辅"的混合识别。
+- 使用 python-docx 读取段落与样式，实现三级优先序的混合识别逻辑。
 - 普通段落归属到其上方最近的标题的 content 列表中。
 - 自动识别并处理文档中的表格，将表格内容转换为Markdown格式。
 - 输出 JSON: { sop_id, sop_name, sections }，sections 为顶层标题列表，
   每个标题包含 { title, level, content, subsections }。
 
-混合识别逻辑：
-1. 第一优先级 - 检查文本：使用正则表达式匹配数字编号格式推断标题级别
-   - 一级：^\\d+\\.\\s+ (如 "1. 目的")
-   - 二级：^\\d+\\.\\d+\\s+ (如 "2.1 适用范围") 
-   - 三级：^\\d+\\.\\d+\\.\\d+\\s+ (如 "2.1.1 具体内容")
-   - 四级：^\\d+\\.\\d+\\.\\d+\\.\\d+\\s+ (如 "2.1.1.1 详细说明")
-   - 五级：^\\d+\\.\\d+\\.\\d+\\.\\d+\\.\\d+\\s+ (如 "2.1.1.1.1 子详细说明")
-   - 六级：^\\d+\\.\\d+\\.\\d+\\.\\d+\\.\\d+\\.\\d+\\s+ (如 "2.1.1.1.1.1 更详细说明")
-   - 七级：^\\d+\\.\\d+\\.\\d+\\.\\d+\\.\\d+\\.\\d+\\.\\d+\\s+ (如 "2.1.1.1.1.1.1 最详细说明")
-   - 八级：^\\d+\\.\\d+\\.\\d+\\.\\d+\\.\\d+\\.\\d+\\.\\d+\\.\\d+\\s+ (如 "2.1.1.1.1.1.1.1 超详细说明")
-   - 九级：^\\d+\\.\\d+\\.\\d+\\.\\d+\\.\\d+\\.\\d+\\.\\d+\\.\\d+\\.\\d+\\s+ (如 "2.1.1.1.1.1.1.1.1 极详细说明")
-   - 十级：^\\d+\\.\\d+\\.\\d+\\.\\d+\\.\\d+\\.\\d+\\.\\d+\\.\\d+\\.\\d+\\.\\d+\\s+ (如 "2.1.1.1.1.1.1.1.1.1 终极详细说明")
-2. 第二优先级 - 检查样式：paragraph.style.name 匹配 'Heading X' 或 '标题 X'（作为备用）
+三级优先序混合识别逻辑：
+1. 第一优先级 - 检查样式：paragraph.style.name 匹配 'Heading X' 或 '标题 X'
+2. 第二优先级 - 检查数字编号：使用正则表达式匹配数字编号格式推断标题级别
+   - 规则A (多级): 匹配如 3.1, 8.2.1 这样的格式，数字和文字间可能没有空格
+   - 规则B (单级): 匹配如 4), 5), 10) 这样的格式，统一视为一级标题
+3. 第三优先级 - 检查关键词：检查纯文本内容是否完全等于预定义的关键词列表
 
 注意：
 - 文档标题(样式名 'Title' 或中文 '标题')不会作为章节加入，而是作为 sop_name 的优先来源。
@@ -38,19 +31,28 @@ import sys
 from typing import Any, Dict, List, Optional, Tuple
 
 try:
-    from docx2python import docx2python  # type: ignore
+    from docx import Document  # type: ignore
+    from docx.oxml.table import CT_Tbl  # type: ignore
+    from docx.oxml.text.paragraph import CT_P  # type: ignore
+    from docx.table import Table  # type: ignore
+    from docx.text.paragraph import Paragraph  # type: ignore
 except ImportError:  # pragma: no cover
     sys.stderr.write(
-        "[ERROR] 未找到 docx2python 库，请先安装：pip install docx2python\n"
+        "[ERROR] 未找到 python-docx 库，请先安装：pip install python-docx\n"
     )
     sys.exit(1)
 
+# 预定义的关键词列表，用于识别纯文本标题
+TOP_LEVEL_KEYWORDS = [
+    "目的", "适用范围", "安全和环境要求", "相关文件", "职责", 
+    "定义和缩写", "活动描叙", "具体操作如下", "附录", "历史纪录"
+]
 
 HeadingNode = Dict[str, Any]
 
 
 def extract_heading_level_from_style(style_name: Optional[str]) -> Optional[int]:
-    """根据段落样式名推断标题级别（第二优先级，作为备用）。
+    """根据段落样式名推断标题级别（第一优先级）。
 
     支持示例：
     - 'Heading 1', 'Heading 2', ..., 'Heading 10'
@@ -66,96 +68,89 @@ def extract_heading_level_from_style(style_name: Optional[str]) -> Optional[int]
     # 英文样式：Heading 1/2/3 ...
     m = re.match(r"^Heading\s+([1-9][0-9]*)$", normalized, re.IGNORECASE)
     if m:
-        return int(m.group(1))
+        level = int(m.group(1))
+        return level if 1 <= level <= 10 else None
 
     # 中文样式：标题 1/2/3 ...
     m = re.match(r"^标题\s*([1-9][0-9]*)$", normalized)
     if m:
-        return int(m.group(1))
+        level = int(m.group(1))
+        return level if 1 <= level <= 10 else None
 
     return None
 
 
 def extract_heading_level_from_text(text: str) -> Optional[int]:
-    """根据段落文本内容推断标题级别（第一优先级）。
+    """根据段落文本内容推断标题级别（第二优先级）。
 
-    使用正则表达式匹配数字编号格式：
-    - 一级：^\\d+\\.\\s+ (如 "1. 目的")
-    - 二级：^\\d+\\.\\d+\\s+ (如 "2.1 适用范围") 
-    - 三级：^\\d+\\.\\d+\\.\\d+\\s+ (如 "2.1.1 具体内容")
-    - 四级：^\\d+\\.\\d+\\.\\d+\\.\\d+\\s+ (如 "2.1.1.1 详细说明")
-    - 五级：^\\d+\\.\\d+\\.\\d+\\.\\d+\\.\\d+\\s+ (如 "2.1.1.1.1 子详细说明")
-    - 六级：^\\d+\\.\\d+\\.\\d+\\.\\d+\\.\\d+\\.\\d+\\s+ (如 "2.1.1.1.1.1 更详细说明")
-    - 七级：^\\d+\\.\\d+\\.\\d+\\.\\d+\\.\\d+\\.\\d+\\.\\d+\\s+ (如 "2.1.1.1.1.1.1 最详细说明")
-    - 八级：^\\d+\\.\\d+\\.\\d+\\.\\d+\\.\\d+\\.\\d+\\.\\d+\\.\\d+\\s+ (如 "2.1.1.1.1.1.1.1 超详细说明")
-    - 九级：^\\d+\\.\\d+\\.\\d+\\.\\d+\\.\\d+\\.\\d+\\.\\d+\\.\\d+\\.\\d+\\s+ (如 "2.1.1.1.1.1.1.1.1 极详细说明")
-    - 十级：^\\d+\\.\\d+\\.\\d+\\.\\d+\\.\\d+\\.\\d+\\.\\d+\\.\\d+\\.\\d+\\.\\d+\\s+ (如 "2.1.1.1.1.1.1.1.1.1 终极详细说明")
+    规则A (多级): 匹配如 3.1, 8.2.1 这样的格式，数字和文字间可能没有空格
+    规则B (单级): 匹配如 4), 5), 10) 这样的格式，统一视为一级标题
     
-    返回对应的整数级别（1-10）；若文本不符合编号格式则返回 None。
+    返回对应的整数级别；若文本不符合编号格式则返回 None。
     """
     if not text:
         return None
     
     text = text.strip()
     
-    # 十级标题：数字.数字.数字.数字.数字.数字.数字.数字.数字.数字 空格
-    if re.match(r"^\d+\.\d+\.\d+\.\d+\.\d+\.\d+\.\d+\.\d+\.\d+\.\d+\s+", text):
-        return 10
+    # 规则A: 多级数字编号 (如 3.1, 8.2.1, 2.1.1.1 等)
+    # 使用 \s* 而不是 \s+ 来兼容数字和文字间没有空格的情况
+    multi_level_match = re.match(r'^(\d+(?:\.\d+)+)\s*', text)
+    if multi_level_match:
+        # 计算点号数量来确定级别
+        number_part = multi_level_match.group(1)
+        level = number_part.count('.') + 1
+        return level if 1 <= level <= 10 else None
     
-    # 九级标题：数字.数字.数字.数字.数字.数字.数字.数字.数字 空格
-    if re.match(r"^\d+\.\d+\.\d+\.\d+\.\d+\.\d+\.\d+\.\d+\.\d+\s+", text):
-        return 9
+    # 规则B: 单级括号编号 (如 4), 5), 10) 等)
+    # 统一视为一级标题
+    single_level_match = re.match(r'^\d+\)\s*', text)
+    if single_level_match:
+        return 1
     
-    # 八级标题：数字.数字.数字.数字.数字.数字.数字.数字 空格
-    if re.match(r"^\d+\.\d+\.\d+\.\d+\.\d+\.\d+\.\d+\.\d+\s+", text):
-        return 8
+    return None
+
+
+def extract_heading_level_from_keywords(text: str) -> Optional[int]:
+    """根据关键词列表推断标题级别（第三优先级）。
+
+    检查清理后的文本是否完全等于预定义的关键词列表中的某一项。
+    如果是，则视为一级标题。
+    """
+    if not text:
+        return None
     
-    # 七级标题：数字.数字.数字.数字.数字.数字.数字 空格
-    if re.match(r"^\d+\.\d+\.\d+\.\d+\.\d+\.\d+\.\d+\s+", text):
-        return 7
+    # 清理文本：移除可能的前置编号和特殊字符
+    clean_text = re.sub(r'^[\d\.\)\s]+', '', text).strip()
     
-    # 六级标题：数字.数字.数字.数字.数字.数字 空格
-    if re.match(r"^\d+\.\d+\.\d+\.\d+\.\d+\.\d+\s+", text):
-        return 6
-    
-    # 五级标题：数字.数字.数字.数字.数字 空格
-    if re.match(r"^\d+\.\d+\.\d+\.\d+\.\d+\s+", text):
-        return 5
-    
-    # 四级标题：数字.数字.数字.数字 空格
-    if re.match(r"^\d+\.\d+\.\d+\.\d+\s+", text):
-        return 4
-    
-    # 三级标题：数字.数字.数字 空格
-    if re.match(r"^\d+\.\d+\.\d+\s+", text):
-        return 3
-    
-    # 二级标题：数字.数字 空格
-    if re.match(r"^\d+\.\d+\s+", text):
-        return 2
-    
-    # 一级标题：数字. 空格
-    if re.match(r"^\d+\.\s+", text):
+    # 检查是否完全匹配关键词列表
+    if clean_text in TOP_LEVEL_KEYWORDS:
         return 1
     
     return None
 
 
 def extract_heading_level(style_name: Optional[str], text: str) -> Optional[int]:
-    """混合识别逻辑：数字编号为主，样式为辅。
+    """三级优先序混合识别逻辑。
     
-    第一优先级：检查文本内容的数字编号格式
-    第二优先级：检查段落样式名（作为备用）
+    第一优先级：检查Word样式
+    第二优先级：检查数字编号（多级和单级）
+    第三优先级：检查关键词列表
     
     返回标题级别（1-10），若非标题则返回 None。
     """
-    # 第一优先级：检查文本编号格式
+    # 第一优先级：检查Word样式
+    level = extract_heading_level_from_style(style_name)
+    if level is not None:
+        return level
+    
+    # 第二优先级：检查数字编号
     level = extract_heading_level_from_text(text)
     if level is not None:
         return level
     
-    # 第二优先级：检查样式（作为备用）
-    level = extract_heading_level_from_style(style_name)
+    # 第三优先级：检查关键词列表
+    level = extract_heading_level_from_keywords(text)
     if level is not None:
         return level
     
@@ -172,29 +167,44 @@ def is_document_title_style(style_name: Optional[str]) -> bool:
     name = style_name.strip()
     if name.lower() == "title":
         return True
-    # 精确等于“标题”视为文档标题，避免与“标题 1/2...”混淆
+    # 精确等于"标题"视为文档标题，避免与"标题 1/2..."混淆
     if name == "标题":
         return True
     return False
 
 
-def convert_table_to_markdown(table_data: List[List[str]]) -> str:
-    """将一个二维列表（表格数据）转换为Markdown表格格式的字符串。
+def convert_table_to_markdown(table: Table) -> str:
+    """将python-docx的Table对象转换为Markdown表格格式的字符串。
     
     参数:
-        table_data: 二维列表，每个子列表代表表格的一行
+        table: python-docx的Table对象
         
     返回:
         Markdown格式的表格字符串
     """
-    if not table_data:
+    if not table or not table.rows:
         return ""
 
     # 构建Markdown表格的字符串
     markdown_string = ""
+    
+    # 获取表格数据
+    table_data = []
+    for row in table.rows:
+        row_data = []
+        for cell in row.cells:
+            # 获取单元格文本，去除多余空白
+            cell_text = cell.text.strip()
+            # 转义Markdown特殊字符
+            cell_text = cell_text.replace('|', '\\|')
+            row_data.append(cell_text)
+        table_data.append(row_data)
+    
+    if not table_data:
+        return ""
 
     # 1. 处理表头
-    header = "| " + " | ".join(str(cell).strip() for cell in table_data[0]) + " |"
+    header = "| " + " | ".join(table_data[0]) + " |"
     markdown_string += header + "\n"
 
     # 2. 处理分隔符行
@@ -206,74 +216,10 @@ def convert_table_to_markdown(table_data: List[List[str]]) -> str:
         # 确保行数据长度与表头一致
         while len(row) < len(table_data[0]):
             row.append("")
-        content_row = "| " + " | ".join(str(cell).strip() for cell in row[:len(table_data[0])]) + " |"
+        content_row = "| " + " | ".join(row[:len(table_data[0])]) + " |"
         markdown_string += content_row + "\n"
 
     return markdown_string
-
-
-def extract_images_from_text(text: str, image_mapping: Dict[str, str]) -> Tuple[str, List[str]]:
-    """从文本中提取图片占位符并返回清理后的文本和图片列表。
-    
-    参数:
-        text: 包含图片占位符的文本
-        image_mapping: 原始文件名到新文件名的映射
-        
-    返回:
-        Tuple[清理后的文本, 图片文件名列表]
-    """
-    if not text:
-        return text, []
-    
-    # 匹配图片占位符格式：----media/filename.ext----
-    image_pattern = r'----media/([^/]+\.(?:png|jpg|jpeg|gif|bmp|tiff?))----'
-    matches = re.findall(image_pattern, text, re.IGNORECASE)
-    
-    # 移除占位符，保留清理后的文本
-    cleaned_text = re.sub(image_pattern, '', text).strip()
-    
-    # 将原始文件名转换为新的文件名
-    new_image_names = []
-    for img_name in matches:
-        if img_name in image_mapping:
-            new_image_names.append(image_mapping[img_name])
-    
-    return cleaned_text, new_image_names
-
-
-def rename_image_files(images_dict: Dict[str, bytes], sop_id: str, image_folder: str) -> Dict[str, str]:
-    """重命名图片文件并返回原始文件名到新文件名的映射。
-    
-    参数:
-        images_dict: docx2python返回的图片字典
-        sop_id: SOP文档ID
-        image_folder: 图片保存目录
-        
-    返回:
-        原始文件名到新文件名的映射字典
-    """
-    if not images_dict:
-        return {}
-    
-    # 确保图片目录存在
-    os.makedirs(image_folder, exist_ok=True)
-    
-    renamed_mapping = {}
-    
-    for original_name, image_data in images_dict.items():
-        # 生成新的唯一文件名
-        name, ext = os.path.splitext(original_name)
-        new_name = f"{sop_id}_{name}{ext}"
-        
-        # 保存重命名后的图片文件
-        new_path = os.path.join(image_folder, new_name)
-        with open(new_path, 'wb') as f:
-            f.write(image_data)
-        
-        # 记录映射关系
-        renamed_mapping[original_name] = new_name
-    
-    return renamed_mapping
 
 
 def make_node(title: str, level: int) -> HeadingNode:
@@ -295,33 +241,31 @@ def docx_to_nested_json(input_path: str) -> Dict[str, Any]:
         raise ValueError("输入文件必须为 .docx 格式")
 
     sop_id = os.path.splitext(os.path.basename(input_path))[0]
-    image_folder = "sop_images"
     
     try:
-        # 使用 docx2python 解析文档
-        doc_result = docx2python(input_path, image_folder=image_folder)
+        # 使用 python-docx 解析文档
+        doc = Document(input_path)
     except Exception as exc:  # pragma: no cover
         raise ValueError(f"无法读取 Word 文档: {exc}")
 
-    # 处理图片文件重命名
-    image_mapping = rename_image_files(doc_result.images, sop_id, image_folder)
-    
-    # 获取文档文本内容和表格数据
-    document_text = doc_result.text
-    document_body = doc_result.body
-    
     # 提取文档标题(sop_name)
     sop_name: Optional[str] = None
-    lines = document_text.split('\n')
-    for line in lines:
-        line = line.strip()
-        if not line:
-            continue
-        # 检查是否为文档标题（通常在第一行或前几行）
-        if not re.match(r'^\d+\.', line):  # 不是数字编号开头
-            sop_name = line
+    
+    # 首先尝试从文档标题样式获取
+    for paragraph in doc.paragraphs:
+        if is_document_title_style(paragraph.style.name) and paragraph.text.strip():
+            sop_name = paragraph.text.strip()
             break
     
+    # 如果没有找到文档标题样式，则从第一段非空文本获取
+    if not sop_name:
+        for paragraph in doc.paragraphs:
+            text = paragraph.text.strip()
+            if text and not re.match(r'^\d+\.', text):  # 不是数字编号开头
+                sop_name = text
+                break
+    
+    # 如果仍然没有找到，使用sop_id作为sop_name
     if not sop_name:
         sop_name = sop_id
 
@@ -329,18 +273,19 @@ def docx_to_nested_json(input_path: str) -> Dict[str, Any]:
     # 栈保存 (level, node)
     heading_stack: List[Tuple[int, HeadingNode]] = []
 
-    # 按行处理文档内容
-    for line in lines:
-        line = line.strip()
-        if not line:
+    # 遍历文档中的所有段落
+    for paragraph in doc.paragraphs:
+        text = paragraph.text.strip()
+        
+        if not text:
             continue
 
         # 检查是否为标题
-        level = extract_heading_level(None, line)  # docx2python不提供样式信息
+        level = extract_heading_level(paragraph.style.name, text)
 
         if level is not None:
             # 新的标题节点。维护单调栈，使其父子关系正确。
-            new_node = make_node(line, level)
+            new_node = make_node(text, level)
 
             # 弹出栈中当前级别及更深的标题，直到找到父级(level 更小)
             while heading_stack and heading_stack[-1][0] >= level:
@@ -357,68 +302,22 @@ def docx_to_nested_json(input_path: str) -> Dict[str, Any]:
             # 将当前标题压栈
             heading_stack.append((level, new_node))
         else:
-            # 普通段落，处理图片占位符
-            cleaned_text, image_names = extract_images_from_text(line, image_mapping)
-            
-            if cleaned_text:  # 只有非空文本才添加
-                if heading_stack:
-                    heading_stack[-1][1]["content"].append(cleaned_text)
-                    
-                    # 添加关联的图片
-                    for img_name in image_names:
-                        if img_name not in heading_stack[-1][1]["images"]:
-                            heading_stack[-1][1]["images"].append(img_name)
-                else:
-                    # 若在任何标题出现之前出现正文，则不纳入 sections。
-                    # 可根据业务需要改为挂入一个"前言"节点。
-                    pass
+            # 普通段落
+            if heading_stack:
+                heading_stack[-1][1]["content"].append(text)
+            else:
+                # 若在任何标题出现之前出现正文，则不纳入 sections。
+                # 可根据业务需要改为挂入一个"前言"节点。
+                pass
 
-    # 处理表格数据 - 从body中提取表格并添加到对应标题下
-    def extract_tables_from_body(body_data):
-        """从docx2python的body数据中提取表格"""
-        tables = []
-        if isinstance(body_data, list):
-            for item in body_data:
-                if isinstance(item, list):
-                    # 检查是否为表格（二维列表结构）
-                    if len(item) > 0 and isinstance(item[0], list):
-                        # 检查是否所有子项都是列表（表格行）
-                        is_table = all(isinstance(row, list) for row in item)
-                        if is_table and len(item) > 1:  # 确保表格有多行
-                            # 清理表格数据，移除方括号和多余格式
-                            cleaned_table = []
-                            for row in item:
-                                cleaned_row = []
-                                for cell in row:
-                                    if isinstance(cell, str):
-                                        # 移除方括号和引号，处理嵌套的字符串表示
-                                        clean_cell = cell.strip("[]'\"")
-                                        # 如果仍然包含方括号，进一步清理
-                                        if '[' in clean_cell and ']' in clean_cell:
-                                            # 使用正则表达式移除所有方括号和引号
-                                            import re
-                                            clean_cell = re.sub(r'[\[\]\'"]', '', clean_cell)
-                                        cleaned_row.append(clean_cell.strip())
-                                    else:
-                                        cleaned_row.append(str(cell).strip())
-                                cleaned_table.append(cleaned_row)
-                            tables.append(cleaned_table)
-                    else:
-                        # 递归处理嵌套结构
-                        tables.extend(extract_tables_from_body(item))
-        return tables
-    
-    document_tables = extract_tables_from_body(document_body)
-    
-    # 将表格添加到最后一个标题下（简化处理）
-    if document_tables and heading_stack:
-        for table_data in document_tables:
-            if table_data:  # 确保表格不为空
-                # 将表格转换为Markdown格式
-                markdown_table = convert_table_to_markdown(table_data)
-                if markdown_table:
-                    # 表格归属到最近的标题
-                    heading_stack[-1][1]["content"].append(markdown_table)
+    # 处理文档中的所有表格
+    for table in doc.tables:
+        if table.rows:  # 确保表格不为空
+            # 将表格转换为Markdown格式
+            markdown_table = convert_table_to_markdown(table)
+            if markdown_table and heading_stack:
+                # 表格归属到最近的标题
+                heading_stack[-1][1]["content"].append(markdown_table)
 
     return {
         "sop_id": sop_id,

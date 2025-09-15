@@ -406,9 +406,19 @@ def process_sop_document_with_images(docx_path: str) -> list:
     image_section_mapping = {}  # 图片与section_path的映射
     pending_images = list(image_mapping.values())  # 待分配的图片列表
     
-    # 从文档中提取SOP信息
-    sop_id = "未知"
-    sop_name = "未知"
+    # 从文件名中提取SOP信息
+    base_name = os.path.splitext(os.path.basename(docx_path))[0]
+    
+    # 尝试从文件名中提取SOP ID（格式：VPO.MGT.WH.3.5.4.001成品酒仓库管理）
+    # 匹配模式：字母数字点号组合，直到遇到中文字符
+    sop_id_match = re.match(r'^([A-Z0-9\.\-]+)', base_name)
+    if sop_id_match:
+        sop_id = sop_id_match.group(1)
+    else:
+        sop_id = "未知"
+    
+    # 从文件名中提取SOP名称（去掉SOP ID后的部分）
+    sop_name = base_name
     
     # 尝试从文档标题中提取SOP信息
     for paragraph in doc.paragraphs[:5]:  # 只检查前5个段落

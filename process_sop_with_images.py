@@ -146,29 +146,24 @@ def find_image_references_in_text(text: str) -> List[str]:
 def is_heading_paragraph(paragraph: Paragraph) -> bool:
     """
     判断段落是否为标题
-    使用三级优先序：样式优先 -> 数字编号 -> 关键词
+    只识别真正的标题，其他所有文本都作为普通文本处理
     """
     # 第一优先级：检查Word样式
     style_name = paragraph.style.name
     if 'Heading' in style_name or '标题' in style_name:
         return True
     
-    # 第二优先级：检查数字编号
     text = paragraph.text.strip()
     
-    # 多级数字编号 (如 3.1, 8.2.1)
+    # 第二优先级：检查多级数字编号 (如 3.1, 8.2.1)
     if re.match(r'^\d+(?:\.\d+)+', text):
         return True
     
-    # 单级数字编号 (如 4), 5))
+    # 第三优先级：检查单级数字编号 (如 4), 5))
     if re.match(r'^\d+\)', text):
         return True
     
-    # 纯数字标题 (如 8.历史文件记录)
-    if re.match(r'^\d+\.\s+', text):
-        return True
-    
-    # 第三优先级：检查关键词
+    # 第四优先级：检查关键词 - 只识别明确的标题关键词
     TOP_LEVEL_KEYWORDS = [
         "目的", "适用范围", "安全和环境要求", "相关文件", "职责", 
         "定义和缩写", "活动描叙", "具体操作如下", "附录", "历史纪录"
@@ -179,9 +174,25 @@ def is_heading_paragraph(paragraph: Paragraph) -> bool:
     if clean_text in TOP_LEVEL_KEYWORDS:
         return True
     
+    # 如果文本没有数字编号但包含关键词，不是标题（需要数字编号）
+    if not re.match(r'^\d+', text) and clean_text in TOP_LEVEL_KEYWORDS:
+        return False
+    
     # 特殊处理：检查是否包含"活动描述"关键词
     if "活动描述" in text and re.match(r'^\d+\.', text):
         return True
+    
+    # 更精确的标题识别：只匹配明确的标题模式
+    if re.match(r'^\d+\.\s+', text):
+        # 只检查明确的标题关键词，不包括描述性词汇
+        title_keywords = [
+            "目的", "适用范围", "职责", "活动描述", "相关文件", "定义", 
+            "附录", "历史", "记录", "规程", "规定", "说明",
+            "流程", "操作", "管理", "控制", "监控"
+        ]
+        # 如果包含标题关键词，则认为是标题
+        if any(keyword in clean_text for keyword in title_keywords):
+            return True
     
     return False
 
@@ -372,7 +383,7 @@ def identify_image_section(image_content: str, current_section_path: str) -> str
         return current_section_path
 
 
-def process_sop_document_with_images(docx_path: str) -> list:
+def process_sop_document_with_images(docx_path: str, output_dir: str = "output") -> list:
     """
     处理SOP文档，返回所有知识块（包含图片处理）
     """
@@ -728,6 +739,7 @@ def process_sop_document_with_images(docx_path: str) -> list:
         filename = info["filename"]
         caption = info.get("caption", "")
         
+        # 特殊处理：特定caption模式
         if "图片 1" in caption:
             # 图片1 -> 2.适用范围
             for chunk in chunks:
@@ -740,6 +752,50 @@ def process_sop_document_with_images(docx_path: str) -> list:
                 if "7.4.3" in chunk.get('section_path', '') and "隔离" in chunk.get('text', ''):
                     chunk['image_filename'] = filename
                     break
+        else:
+            # 通用处理：基于caption内容匹配章节
+            target_chunk = None
+            best_match_score = 0
+            
+            # 提取caption中的关键词
+            caption_keywords = []
+            if caption:
+                # 提取数字和关键词
+                numbers = re.findall(r'\d+\.?\d*', caption)
+                keywords = re.findall(r'[a-zA-Z\u4e00-\u9fff]+', caption)
+                caption_keywords = numbers + keywords
+            
+            # 在chunks中寻找最佳匹配
+            for chunk in chunks:
+                chunk_text = chunk.get('text', '')
+                chunk_section = chunk.get('section_path', '')
+                
+                match_score = 0
+                
+                # 检查caption是否在section_path中
+                if caption and caption in chunk_section:
+                    match_score += 10
+                
+                # 检查关键词匹配
+                for keyword in caption_keywords:
+                    if keyword in chunk_text or keyword in chunk_section:
+                        match_score += 1
+                
+                # 检查caption中的数字是否在section_path中
+                for num in numbers:
+                    if num in chunk_section:
+                        match_score += 2
+                
+                if match_score > best_match_score:
+                    best_match_score = match_score
+                    target_chunk = chunk
+            
+            # 如果找到匹配的chunk，分配图片
+            if target_chunk and best_match_score > 0:
+                target_chunk['image_filename'] = filename
+                print(f"  后处理分配图片: {filename} -> {target_chunk['section_path']} (匹配分数: {best_match_score})")
+            else:
+                print(f"  警告: 无法为图片 {filename} 找到匹配的章节")
     
     # 输出图片与section_path的映射信息
     if image_section_mapping:
@@ -747,7 +803,29 @@ def process_sop_document_with_images(docx_path: str) -> list:
         for image_file, section_path in image_section_mapping.items():
             print(f"  {image_file} -> {section_path}")
     
-    return chunks
+    # 保存到CSV文件
+    if not chunks:
+        print("处理失败，未生成任何知识块")
+        return False
+    
+    # 确保输出目录存在
+    os.makedirs(output_dir, exist_ok=True)
+    
+    # 生成输出文件名
+    base_name = os.path.splitext(os.path.basename(docx_path))[0]
+    output_file = os.path.join(output_dir, f"{base_name}_processed_with_images.csv")
+    
+    # 转换为DataFrame并保存
+    df = pd.DataFrame(chunks)
+    # 删除image_section_path列（如果存在）
+    if 'image_section_path' in df.columns:
+        df = df.drop('image_section_path', axis=1)
+    df.to_csv(output_file, index=False, encoding='utf-8-sig', quoting=1)
+    
+    print(f"成功保存到: {output_file}")
+    print(f"总共生成 {len(chunks)} 个知识块")
+    
+    return True
 
 
 def main():
@@ -762,25 +840,15 @@ def main():
         sys.exit(1)
     
     # 处理文档
-    chunks = process_sop_document_with_images(docx_path)
+    result = process_sop_document_with_images(docx_path, "output")
     
-    if not chunks:
+    if not result:
         print("处理失败，未生成任何知识块")
-        return
+        return False
     
-    # 生成输出文件名
-    base_name = os.path.splitext(os.path.basename(docx_path))[0]
-    output_file = f"{base_name}_processed_with_images.csv"
+    print("处理完成")
     
-    # 转换为DataFrame并保存
-    df = pd.DataFrame(chunks)
-    # 删除image_section_path列（如果存在）
-    if 'image_section_path' in df.columns:
-        df = df.drop('image_section_path', axis=1)
-    df.to_csv(output_file, index=False, encoding='utf-8-sig', quoting=1)
-    
-    print(f"成功保存到: {output_file}")
-    print(f"总共生成 {len(chunks)} 个知识块")
+    return True
 
 
 if __name__ == "__main__":

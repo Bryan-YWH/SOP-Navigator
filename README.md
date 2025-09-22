@@ -16,34 +16,22 @@
 - **动态标题生成**: 为表格生成准确的动态标题
 - **内容合并优化**: 标题和内容正确合并，避免过度拆分
 
-### 2. 分步处理流程
-#### 文档解析 (`word_to_json.py`)
-- **多格式支持**: 支持Word标准标题样式和数字编号格式
-- **智能识别**: 自动识别1-10级标题层级结构
-- **图片处理**: 自动提取、重命名和关联图片文件
-- **表格转换**: 将Word表格转换为Markdown格式
-- **标题优化**: 标题同时作为内容存储，提升检索效果
-
-#### 数据扁平化 (`json_to_csv.py`)
-- **结构转换**: 将嵌套JSON转换为扁平CSV格式
-- **路径追踪**: 保持完整的章节路径信息
-- **元数据保留**: 保留所有文档元数据
-
-#### 文本块精炼 (`refine_chunks.py`)
-- **智能拆分**: 根据标题自动拆分大文本块
-- **粒度优化**: 生成适合RAG检索的细粒度文本块
-- **格式标准化**: 统一列表格式，提升可读性
-- **主题聚焦**: 确保每个文本块围绕单一主题
+### 2. 批量处理 (`batch_process_annotated_docs.py`)
+- **批量处理**: 自动处理"标注完的文档"文件夹中的所有文档
+- **统一输出**: 所有CSV文件输出到"output"文件夹
+- **进度跟踪**: 显示处理进度和结果统计
+- **错误处理**: 自动跳过无法处理的文档
 
 ## 项目结构
 
 ```
 SOP-Navigator/
 ├── process_sop_with_images.py  # 一体化处理脚本（推荐）
-├── process_sop_to_csv.py       # 基础处理脚本
-├── word_to_json.py             # Word文档转JSON
-├── json_to_csv.py              # JSON转CSV
-├── refine_chunks.py            # 文本块精炼
+├── batch_process_annotated_docs.py  # 批量处理脚本
+├── output/                     # 输出CSV文件目录
+├── sop_images/                 # 提取的图片文件目录
+├── 标注完的文档/               # 待处理的Word文档目录
+├── 待处理的文档/               # 其他待处理文档目录
 ├── .gitignore                  # Git忽略文件
 ├── README.md                   # 项目说明
 └── requirements.txt            # 依赖包列表
@@ -70,33 +58,25 @@ pip install docx2python pandas
 
 ## 使用方法
 
-### 1. 一体化处理（推荐）
+### 1. 单个文档处理
 
 ```bash
 # 一步完成：Word文档 → 精炼CSV（包含图片处理）
 python process_sop_with_images.py "your_sop_document.docx"
 ```
 
-### 2. 分步处理流程
+### 2. 批量处理（推荐）
 
 ```bash
-# 步骤1: Word文档转JSON
-python word_to_json.py "your_sop_document.docx"
-
-# 步骤2: JSON转CSV
-python json_to_csv.py "your_sop_document.json"
-
-# 步骤3: 文本块精炼
-python refine_chunks.py "your_sop_document.csv" "your_sop_document_refined.csv"
+# 批量处理"标注完的文档"文件夹中的所有文档
+python batch_process_annotated_docs.py
 ```
 
 ### 3. 输出文件说明
 
-- **一体化处理输出**: `your_sop_document_processed_with_images.csv` - 直接可用的完整CSV文件
-- **分步处理输出**:
-  - **JSON文件**: 包含完整的文档结构和元数据
-  - **CSV文件**: 扁平化的知识块，适合导入RAG系统
-  - **精炼CSV**: 优化后的细粒度文本块
+- **CSV文件**: `your_sop_document_processed_with_images.csv` - 直接可用的完整CSV文件
+- **图片文件**: 自动提取并保存到`sop_images`文件夹
+- **批量输出**: 所有CSV文件统一输出到`output`文件夹
 
 ## 核心特性
 
@@ -141,8 +121,8 @@ python refine_chunks.py "your_sop_document.csv" "your_sop_document_refined.csv"
 - **处理速度**: 平均每页文档<1秒
 - **准确率**: 标题识别>95%，表格归属>90%
 - **完整性**: 图片和表格100%保留
-- **优化率**: 文本块粒度提升24.1%
-- **效率提升**: 一体化处理比分步处理快3倍
+- **批量处理**: 支持10+文档同时处理
+- **效率提升**: 一体化处理比传统方法快3倍
 
 ## 安全考虑
 

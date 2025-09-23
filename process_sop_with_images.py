@@ -23,6 +23,17 @@ from docx.oxml.ns import qn
 from docx.oxml import parse_xml
 
 
+def iter_block_items(doc: Document):
+    """
+    按文档实际顺序依次返回段落和表格。
+    用于在不改动主处理流程的情况下，预先为表格记录其出现位置对应的最近标题路径。
+    """
+    for child in doc.element.body.iterchildren():
+        if isinstance(child, CT_P):
+            yield Paragraph(child, doc)
+        elif isinstance(child, CT_Tbl):
+            yield Table(child, doc)
+
 def extract_images_with_captions_from_docx(docx_path: str, output_dir: str = "sop_images") -> Dict[str, Dict[str, str]]:
     """
     从Word文档中提取图片及其caption信息并保存到指定目录
@@ -152,6 +163,9 @@ def is_heading_paragraph(paragraph: Paragraph) -> bool:
     style_name = paragraph.style.name
     if 'Heading' in style_name or '标题' in style_name:
         return True
+    # 兼容简写样式名：H1/H2/H3...
+    if re.match(r'^H\d+$', style_name):
+        return True
     
     text = paragraph.text.strip()
     
@@ -182,13 +196,12 @@ def is_heading_paragraph(paragraph: Paragraph) -> bool:
     if "活动描述" in text and re.match(r'^\d+\.', text):
         return True
     
-    # 更精确的标题识别：只匹配明确的标题模式
-    if re.match(r'^\d+\.\s+', text):
+    # 更精确的标题识别：只匹配明确的标题模式（兼容有无空格）
+    if re.match(r'^\d+\.\s*', text):
         # 只检查明确的标题关键词，不包括描述性词汇
         title_keywords = [
             "目的", "适用范围", "职责", "活动描述", "相关文件", "定义", 
-            "附录", "历史", "记录", "规程", "规定", "说明",
-            "流程", "操作", "管理", "控制", "监控"
+            "附录", "历史", "记录", "规程", "说明", "注意事项"
         ]
         # 如果包含标题关键词，则认为是标题
         if any(keyword in clean_text for keyword in title_keywords):
@@ -211,6 +224,11 @@ def get_heading_level(paragraph: Paragraph) -> int:
         match = re.search(r'标题\s*(\d+)', style_name)
         if match:
             return int(match.group(1))
+    else:
+        # 兼容H1/H2/H3样式
+        m = re.match(r'^H(\d+)$', style_name)
+        if m:
+            return int(m.group(1))
     
     # 第二优先级：检查数字编号
     text = paragraph.text.strip()
@@ -226,12 +244,12 @@ def get_heading_level(paragraph: Paragraph) -> int:
         return 1
     
     # 纯数字标题 (如 8.历史文件记录)
-    if re.match(r'^\d+\.\s+', text):
+    if re.match(r'^\d+\.\s*', text):
         return 1
     
     # 第三优先级：检查关键词
     TOP_LEVEL_KEYWORDS = [
-        "目的", "适用范围", "安全和环境要求", "相关文件", "职责", 
+        "目的", "适用范围", "安全和环境要求", "环境和安全说明", "相关文件", "职责", 
         "定义和缩写", "活动描叙", "具体操作如下", "附录", "历史纪录"
     ]
     
@@ -300,6 +318,8 @@ def identify_table_section(table_content: str) -> str:
         return "3.2 关键控制点"
     elif "成品库保管员" in table_content and "成品库班长" in table_content and "SOP撰写" in table_content:
         return "5.职责"
+    # 通用RACI职责矩阵识别
+    # 不再强制映射RACI矩阵到固定章节，优先以文档当前位置归属
     elif "本SOP涉及到的主要KPI" in table_content and "PI" in table_content:
         return "6.定义和缩写"
     elif "版本" in table_content and "作者" in table_content and "日期" in table_content:
@@ -413,6 +433,7 @@ def process_sop_document_with_images(docx_path: str, output_dir: str = "output")
     current_heading_text = ""  # 当前最深层级的标题文本
     table_counter_map = defaultdict(int)  # 为每个标题维护独立的表格计数器
     current_content_buffer = []  # 当前小节的内容缓冲区
+    heading_counters: List[int] = []  # 自动编号计数器（按层级维护）
     image_counter = 1  # 图片计数器
     image_section_mapping = {}  # 图片与section_path的映射
     pending_images = list(image_mapping.values())  # 待分配的图片列表
@@ -429,36 +450,120 @@ def process_sop_document_with_images(docx_path: str, output_dir: str = "output")
         sop_id = "未知"
     
     # 从文件名中提取SOP名称（去掉SOP ID后的部分）
-    sop_name = base_name
-    
-    # 尝试从文档标题中提取SOP信息
-    for paragraph in doc.paragraphs[:5]:  # 只检查前5个段落
-        text = paragraph.text.strip()
-        if text:
-            # 尝试匹配SOP ID
-            id_match = re.search(r'SOP[:\s]*([A-Z0-9\.\-]+)', text)
-            if id_match:
-                sop_id = id_match.group(1)
-            
-            # 尝试匹配SOP名称
-            if "规定" in text or "规程" in text or "程序" in text:
-                sop_name = text
+    # 如果文件名包含SOP ID，则去掉SOP ID部分作为SOP名称
+    if sop_id != "未知" and base_name.startswith(sop_id):
+        sop_name = base_name[len(sop_id):].strip()
+        # 如果去掉SOP ID后为空，则使用完整文件名
+        if not sop_name:
+            sop_name = base_name
+    else:
+        sop_name = base_name
     
     print(f"SOP ID: {sop_id}")
     print(f"SOP名称: {sop_name}")
     
+    # 收集图片caption用于判定“图片标题型段落”，避免把它们当作新小节切分
+    caption_set = set()
+    for _img_id, _img in image_info.items():
+        cap = (_img.get("caption") or "").strip()
+        if cap:
+            caption_set.add(cap)
+    
+    # 预扫描：按文档出现顺序为每个表格记录"出现时最近的标题路径"
+    table_position_section: Dict[int, str] = {}
+    temp_heading_stack: List[str] = []
+    temp_counters: List[int] = []  # 预扫描用的编号计数器
+    table_index = 0  # 表格索引计数器
+    for block in iter_block_items(doc):
+        if isinstance(block, Paragraph):
+            if is_heading_paragraph(block):
+                h_text = block.text.strip()
+                h_level = get_heading_level(block)
+                # 计算编号（与主流程一致）：显式编号优先，否则自动编号
+                number_match = re.match(r'^(\d+(?:\.\d+)*)', h_text)
+                if number_match:
+                    explicit_numbers = [int(n) for n in number_match.group(1).split('.') if n.isdigit()]
+                    temp_counters = explicit_numbers.copy()
+                    numbered_text = h_text
+                else:
+                    if len(temp_counters) < h_level:
+                        temp_counters += [0] * (h_level - len(temp_counters))
+                    else:
+                        temp_counters = temp_counters[:h_level]
+                    if not temp_counters:
+                        temp_counters = [1]
+                    else:
+                        temp_counters[-1] += 1
+                    number_str = '.'.join(str(x) for x in temp_counters)
+                    if h_level == 1:
+                        numbered_text = f"{number_str}. {h_text}" if not re.match(r'^\d', h_text) else h_text
+                    else:
+                        numbered_text = f"{number_str} {h_text}" if not re.match(r'^\d', h_text) else h_text
+
+                # 同步更新临时标题栈（使用编号后的标题，确保表格位置路径带编号）
+                if temp_heading_stack:
+                    # 移除同级及更深层级
+                    if len(temp_heading_stack) >= h_level:
+                        temp_heading_stack = temp_heading_stack[:h_level-1]
+                temp_heading_stack.append(numbered_text)
+        elif isinstance(block, Table):
+            # 记录该表格在文档中的当前位置路径，使用表格索引作为键
+            table_position_section[table_index] = " > ".join(temp_heading_stack)
+            table_index += 1
+
     # 遍历文档的所有段落和表格
     # 首先处理所有段落
     for paragraph in doc.paragraphs:
         if is_heading_paragraph(paragraph):
+            # 如果该标题文本与任一图片caption完全一致，则视为图片标题，不作为新小节切分
+            # 直接跳过（不写入buffer，不改变heading_stack），图片会在后处理阶段插入到对应小节末尾
+            if paragraph.text.strip() in caption_set:
+                continue
             # 这是一个标题
             heading_text = paragraph.text.strip()
             heading_level = get_heading_level(paragraph)
+            # 为无编号标题自动分配编号，并与已有编号保持同步
+            number_match = re.match(r'^(\d+(?:\.\d+)*)', heading_text)
+            if number_match:
+                # 同步计数器为显式编号
+                explicit_numbers = [int(n) for n in number_match.group(1).split('.') if n.isdigit()]
+                # 调整计数器长度
+                heading_counters = explicit_numbers.copy()
+            else:
+                # 基于层级生成自动编号
+                # 确保计数器长度与层级一致
+                if len(heading_counters) < heading_level:
+                    heading_counters += [0] * (heading_level - len(heading_counters))
+                else:
+                    heading_counters = heading_counters[:heading_level]
+                # 当前层级自增，深层级清零隐含在截断中
+                if not heading_counters:
+                    heading_counters = [1]
+                else:
+                    heading_counters[-1] += 1
+                number_str = '.'.join(str(x) for x in heading_counters)
+                # 规范化标题展示：数字与标题之间加空格（如 1. 目的 / 5.1 成品酒入库检查）
+                if not heading_text:
+                    heading_text = number_str + ('.' if heading_level == 1 else '')
+                elif re.match(r'^\d', heading_text):
+                    # 已有数字（少见），保持原样
+                    pass
+                else:
+                    # 如果子层级（例如5.1 标题），自动添加空格
+                    if heading_level == 1:
+                        heading_text = f"{number_str}. {heading_text}"
+                    else:
+                        heading_text = f"{number_str} {heading_text}"
             
             # 如果有收集的内容，先处理之前的内容（包括上一个标题和其内容）
             if current_content_buffer:
                 section_path = build_section_path(heading_stack)
                 combined_text = normalize_list_symbols('\n'.join(current_content_buffer))
+                # 优先使用chunk首行的数字标题作为section_path，以避免父级错绑
+                if combined_text.strip():
+                    first_line = combined_text.split('\n', 1)[0].strip()
+                    if re.match(r'^\d+(?:\.\d+)*(?:\.)?\s*.+', first_line):
+                        section_path = first_line
                 
                 # 智能分配图片：优先分配给有图片引用的内容
                 image_filename = ""
@@ -492,14 +597,16 @@ def process_sop_document_with_images(docx_path: str, output_dir: str = "output")
                     image_section_mapping[image_filename] = image_section_path
                     print(f"图片关联: {image_filename} -> {image_section_path} (按顺序分配)")
                 
-                chunks.append({
-                    'text': combined_text,
-                    'sop_id': sop_id,
-                    'sop_name': sop_name,
-                    'section_path': section_path,
-                    'image_filename': image_filename,
-                    'image_section_path': image_section_path
-                })
+                # 跳过文档开头的总标题等无章节内容（无section_path时不落盘）
+                if section_path:
+                    chunks.append({
+                        'chunk': combined_text,
+                        'sop_id': sop_id,
+                        'sop_name': sop_name,
+                        'section_path': section_path,
+                        'image_filename': image_filename,
+                        'image_section_path': image_section_path
+                    })
                 current_content_buffer = []
             
             # 更新标题栈
@@ -528,6 +635,11 @@ def process_sop_document_with_images(docx_path: str, output_dir: str = "output")
     if current_content_buffer:
         section_path = build_section_path(heading_stack)
         combined_text = normalize_list_symbols('\n'.join(current_content_buffer))
+        # 优先使用chunk首行的数字标题作为section_path
+        if combined_text.strip():
+            first_line = combined_text.split('\n', 1)[0].strip()
+            if re.match(r'^\d+(?:\.\d+)*(?:\.)?\s*.+', first_line):
+                section_path = first_line
         
         # 智能分配图片
         image_filename = ""
@@ -561,85 +673,45 @@ def process_sop_document_with_images(docx_path: str, output_dir: str = "output")
             image_section_mapping[image_filename] = image_section_path
             print(f"图片关联: {image_filename} -> {image_section_path} (按顺序分配)")
         
-        chunks.append({
-            'text': combined_text,
-            'sop_id': sop_id,
-            'sop_name': sop_name,
-            'section_path': section_path,
-            'image_filename': image_filename,
-            'image_section_path': image_section_path
-        })
-    
-    # 然后处理所有表格
-    for table in doc.tables:
-        # 转换表格为Markdown
-        markdown_table = table_to_markdown(table)
-        
-        if markdown_table:
-            # 根据表格内容识别归属章节
-            table_section = identify_table_section(markdown_table)
-            
-        # 如果有收集的内容，先处理当前小节的文本内容
-        if current_content_buffer:
-            section_path = build_section_path(heading_stack)
-            combined_text = normalize_list_symbols('\n'.join(current_content_buffer))
-            
-            # 智能分配图片
-            image_filename = ""
-            image_section_path = ""
-            image_refs = find_image_references_in_text(combined_text)
-            
-            # 特殊处理：检查是否应该将图片分配给7.4.3章节
-            should_assign_to_743 = False
-            if "隔离" in combined_text and "7.4" in section_path:
-                should_assign_to_743 = True
-            
-            if image_refs and pending_images:
-                # 有图片引用，分配第一张待分配图片
-                image_filename = pending_images.pop(0)
-                if should_assign_to_743:
-                    image_section_path = "7.活动描述 > 7.4不合格品管理 > 7.4.3当班班长接收隔离完成后，当班邮件反馈隔离信息，通知QA人员现场张贴隔离单，QA邮件反馈隔离信息；（隔离单上应包含隔离数量、品种、批次，隔离原因及隔离人，严格执行隔离四要素；隔离四要素请参考《隔离酒OPL》及《品质隔离标准VPO QUAL WH 3 4 1 002 隔离酒操作.docx》；"
-                else:
-                    image_section_path = identify_image_section(combined_text, section_path)
-                image_section_mapping[image_filename] = image_section_path
-                print(f"图片关联: {image_filename} -> {image_section_path} (基于图片引用)")
-            elif pending_images and should_assign_to_743:
-                # 特殊处理：将图片分配给7.4.3章节
-                image_filename = pending_images.pop(0)
-                image_section_path = "7.活动描述 > 7.4不合格品管理 > 7.4.3当班班长接收隔离完成后，当班邮件反馈隔离信息，通知QA人员现场张贴隔离单，QA邮件反馈隔离信息；（隔离单上应包含隔离数量、品种、批次，隔离原因及隔离人，严格执行隔离四要素；隔离四要素请参考《隔离酒OPL》及《品质隔离标准VPO QUAL WH 3 4 1 002 隔离酒操作.docx》；"
-                image_section_mapping[image_filename] = image_section_path
-                print(f"图片关联: {image_filename} -> {image_section_path} (特殊分配7.4.3)")
-            elif pending_images:
-                # 分配剩余的图片
-                image_filename = pending_images.pop(0)
-                image_section_path = identify_image_section(combined_text, section_path)
-                image_section_mapping[image_filename] = image_section_path
-                print(f"图片关联: {image_filename} -> {image_section_path} (按顺序分配)")
-                
-                chunks.append({
-                    'text': combined_text,
-                    'sop_id': sop_id,
-                    'sop_name': sop_name,
-                    'section_path': section_path,
-                    'image_filename': image_filename,
-                    'image_section_path': image_section_path
-                })
-                current_content_buffer = []
-            
-            # 增加表格所属章节的表格计数器
-            table_counter_map[table_section] += 1
-            table_counter = table_counter_map[table_section]
-            
-            # 生成动态标题和内容
-            dynamic_title = f"标题：{table_section} - 表格 {table_counter}"
-            combined_text = f"{dynamic_title}\n\n{markdown_table}"
-            
-            # 构建section_path - 根据表格所属章节构建正确的路径
-            table_section_path = build_table_section_path(table_section, heading_stack)
-            
-            # 创建独立的知识块
+        # 跳过无section_path的开头简介段落
+        if section_path:
             chunks.append({
-                'text': combined_text,
+                'chunk': combined_text,
+                'sop_id': sop_id,
+                'sop_name': sop_name,
+                'section_path': section_path,
+                'image_filename': image_filename,
+                'image_section_path': image_section_path
+            })
+    
+    # 然后按文档真实顺序处理表格（在遇到表格时就地落盘，使用出现位置路径）
+    table_index = 0  # 表格索引计数器
+    for block in iter_block_items(doc):
+        if isinstance(block, Table):
+            table = block
+            markdown_table = table_to_markdown(table)
+            if not markdown_table:
+                continue
+
+            # 位置优先：表格出现时记录的最近标题路径
+            position_path = table_position_section.get(table_index, "")
+            
+            # 强制使用预扫描记录的位置路径，确保表格归属正确
+            if position_path:
+                table_section_path = position_path
+                print(f"表格 {table_index} 使用预扫描位置路径: {table_section_path}")
+            else:
+                # 如果预扫描失败，尝试内容规则
+                table_section = identify_table_section(markdown_table)
+                table_section_path = build_table_section_path(table_section, [])
+                print(f"表格 {table_index} 使用内容规则路径: {table_section_path}")
+
+            leaf_title = table_section_path.split(' > ')[-1] if table_section_path else '表格'
+            table_counter_map[leaf_title] += 1
+            print(f"处理表格: {table_section_path or '未知章节'} - 表格 {table_counter_map[leaf_title]}")
+
+            chunks.append({
+                'chunk': f"{leaf_title}\n\n{markdown_table}",
                 'sop_id': sop_id,
                 'sop_name': sop_name,
                 'section_path': table_section_path,
@@ -647,7 +719,7 @@ def process_sop_document_with_images(docx_path: str, output_dir: str = "output")
                 'image_section_path': ''
             })
             
-            print(f"处理表格: {table_section} - 表格 {table_counter}")
+            table_index += 1
     
     print(f"总共处理了 {len(chunks)} 个知识块")
     
@@ -714,17 +786,48 @@ def process_sop_document_with_images(docx_path: str, output_dir: str = "output")
             
             # 如果找到匹配的chunk，分配图片
             if target_chunk and best_match_score > 0:
-                target_chunk['image_filename'] = filename
-                image_section_mapping[filename] = target_chunk['section_path']
-                print(f"  分配图片到: {target_chunk['section_path']} (匹配分数: {best_match_score})")
+                # 将图片作为独立chunk插入到其对应的大纲前缀块（如 5.1）的最后位置之后
+                target_section = target_chunk['section_path']
+                prefix_match = re.match(r'^(\d+(?:\.\d+)?)', target_section or "")
+                section_prefix = prefix_match.group(1) if prefix_match else target_section
+                insert_after = max(
+                    (i for i, c in enumerate(chunks) if c.get('section_path', '').startswith(section_prefix)),
+                    default=len(chunks)-1
+                )
+                image_chunk = {
+                    'chunk': f"{target_section}\n\n[图片]\n{filename}",
+                    'sop_id': sop_id,
+                    'sop_name': sop_name,
+                    'section_path': target_section,
+                    'image_filename': filename,
+                    'image_section_path': target_section
+                }
+                chunks.insert(insert_after + 1, image_chunk)
+                image_section_mapping[filename] = target_section
+                print(f"  插入图片chunk到: {target_section} (匹配分数: {best_match_score})")
             else:
                 print(f"  未找到匹配的章节，使用默认分配")
                 # 如果没有找到匹配的章节，将图片分配到7.4.3章节
-                for chunk in chunks:
+                for i, chunk in enumerate(chunks):
                     if "7.4.3" in chunk.get('section_path', '') and "隔离" in chunk.get('text', ''):
-                        chunk['image_filename'] = filename
-                        image_section_mapping[filename] = chunk['section_path']
-                        print(f"  默认分配图片到: {chunk['section_path']}")
+                        target_section = chunk['section_path']
+                        prefix_match = re.match(r'^(\d+(?:\.\d+)?)', target_section or "")
+                        section_prefix = prefix_match.group(1) if prefix_match else target_section
+                        insert_after = max(
+                            (j for j, c in enumerate(chunks) if c.get('section_path', '').startswith(section_prefix)),
+                            default=i
+                        )
+                        image_chunk = {
+                            'chunk': f"{target_section}\n\n[图片]\n{filename}",
+                            'sop_id': sop_id,
+                            'sop_name': sop_name,
+                            'section_path': target_section,
+                            'image_filename': filename,
+                            'image_section_path': target_section
+                        }
+                        chunks.insert(insert_after + 1, image_chunk)
+                        image_section_mapping[filename] = target_section
+                        print(f"  默认插入图片chunk到: {target_section}")
                         break
         else:
             print(f"处理图片: {filename} (无标题)")
@@ -744,13 +847,40 @@ def process_sop_document_with_images(docx_path: str, output_dir: str = "output")
             # 图片1 -> 2.适用范围
             for chunk in chunks:
                 if "2.适用范围" in chunk.get('section_path', '') and "图片 1" in chunk.get('text', ''):
-                    chunk['image_filename'] = filename
+                    # 插入独立图片chunk到该section前缀块的末尾
+                    target_section = chunk['section_path']
+                    prefix_match = re.match(r'^(\d+(?:\.\d+)?)', target_section or "")
+                    section_prefix = prefix_match.group(1) if prefix_match else target_section
+                    insert_after = max(
+                        (i for i, c in enumerate(chunks) if c.get('section_path', '').startswith(section_prefix)),
+                        default=len(chunks)-1
+                    )
+                    chunks.insert(insert_after + 1, {
+                        'chunk': f"{target_section}\n\n[图片]\n{filename}",
+                        'sop_id': sop_id,
+                        'sop_name': sop_name,
+                        'section_path': target_section,
+                        'image_filename': filename
+                    })
                     break
         elif "图片 2" in caption or "隔离" in caption or "opl" in caption.lower():
             # 图片2 -> 7.4.3章节
             for chunk in chunks:
                 if "7.4.3" in chunk.get('section_path', '') and "隔离" in chunk.get('text', ''):
-                    chunk['image_filename'] = filename
+                    target_section = chunk['section_path']
+                    prefix_match = re.match(r'^(\d+(?:\.\d+)?)', target_section or "")
+                    section_prefix = prefix_match.group(1) if prefix_match else target_section
+                    insert_after = max(
+                        (i for i, c in enumerate(chunks) if c.get('section_path', '').startswith(section_prefix)),
+                        default=len(chunks)-1
+                    )
+                    chunks.insert(insert_after + 1, {
+                        'chunk': f"{target_section}\n\n[图片]\n{filename}",
+                        'sop_id': sop_id,
+                        'sop_name': sop_name,
+                        'section_path': target_section,
+                        'image_filename': filename
+                    })
                     break
         else:
             # 通用处理：基于caption内容匹配章节
@@ -790,10 +920,23 @@ def process_sop_document_with_images(docx_path: str, output_dir: str = "output")
                     best_match_score = match_score
                     target_chunk = chunk
             
-            # 如果找到匹配的chunk，分配图片
+            # 如果找到匹配的chunk，插入独立图片chunk到该section前缀块末尾
             if target_chunk and best_match_score > 0:
-                target_chunk['image_filename'] = filename
-                print(f"  后处理分配图片: {filename} -> {target_chunk['section_path']} (匹配分数: {best_match_score})")
+                target_section = target_chunk['section_path']
+                prefix_match = re.match(r'^(\d+(?:\.\d+)?)', target_section or "")
+                section_prefix = prefix_match.group(1) if prefix_match else target_section
+                insert_after = max(
+                    (i for i, c in enumerate(chunks) if c.get('section_path', '').startswith(section_prefix)),
+                    default=len(chunks)-1
+                )
+                chunks.insert(insert_after + 1, {
+                    'chunk': f"{target_section}\n\n[图片]\n{filename}",
+                    'sop_id': sop_id,
+                    'sop_name': sop_name,
+                    'section_path': target_section,
+                    'image_filename': filename
+                })
+                print(f"  后处理插入图片chunk: {filename} -> {target_section} (匹配分数: {best_match_score})")
             else:
                 print(f"  警告: 无法为图片 {filename} 找到匹配的章节")
     

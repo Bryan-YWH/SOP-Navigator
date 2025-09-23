@@ -21,6 +21,13 @@
 sop_images/
 test_images/
 
+# 输出目录
+output/
+
+# 文档目录
+标注完的文档/
+待处理的文档/
+
 # Python缓存文件
 __pycache__/
 *.py[cod]

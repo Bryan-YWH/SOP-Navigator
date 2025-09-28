@@ -63,12 +63,21 @@ def extract_images_with_captions_from_docx(docx_path: str, output_dir: str = "so
     for i, paragraph in enumerate(doc.paragraphs):
         # 检查段落是否包含图片
         has_image = False
+        image_rel_id = None
+        
         for run in paragraph.runs:
-            if run._element.xpath('.//a:blip'):
-                has_image = True
+            # 查找图片关系ID
+            for drawing in run._element.xpath('.//a:blip'):
+                # 获取图片关系ID
+                embed_id = drawing.get('{http://schemas.openxmlformats.org/officeDocument/2006/relationships}embed')
+                if embed_id:
+                    image_rel_id = embed_id
+                    has_image = True
+                    break
+            if has_image:
                 break
         
-        if has_image:
+        if has_image and image_rel_id:
             # 查找图片的caption（通常在图片下方或上方的段落中）
             caption = ""
             
@@ -82,46 +91,83 @@ def extract_images_with_captions_from_docx(docx_path: str, output_dir: str = "so
                     if next_para.text.strip():
                         caption = next_para.text.strip()
             
-            # 从文档中提取实际的图片数据
+            # 根据关系ID找到对应的图片关系
+            target_rel = None
             for rel in doc.part.rels.values():
-                if "image" in rel.target_ref and rel.target_ref not in [info["filename"] for info in image_info.values()]:
-                    # 获取图片数据
-                    image_data = rel.target_part.blob
-                    
-                    # 确定图片扩展名
-                    if rel.target_ref.endswith('.png'):
-                        ext = '.png'
-                    elif rel.target_ref.endswith('.jpg') or rel.target_ref.endswith('.jpeg'):
-                        ext = '.jpg'
-                    elif rel.target_ref.endswith('.gif'):
-                        ext = '.gif'
-                    elif rel.target_ref.endswith('.bmp'):
-                        ext = '.bmp'
-                    else:
-                        ext = '.png'  # 默认扩展名
-                    
-                    # 生成图片文件名
-                    image_filename = f"{doc_name}_image{image_counter}{ext}"
-                    image_path = os.path.join(output_dir, image_filename)
-                    
-                    # 保存图片
-                    with open(image_path, 'wb') as f:
-                        f.write(image_data)
-                    
-                    # 记录图片信息
-                    image_info[f"image_{image_counter}"] = {
-                        "filename": image_filename,
-                        "caption": caption
-                    }
-                    
-                    print(f"提取图片: {image_filename}")
-                    if caption:
-                        print(f"  图片标题: {caption}")
-                    
-                    image_counter += 1
+                if rel.rId == image_rel_id:
+                    target_rel = rel
                     break
+            
+            if target_rel and "image" in target_rel.target_ref:
+                # 获取图片数据
+                image_data = target_rel.target_part.blob
+                
+                # 确定图片扩展名
+                if target_rel.target_ref.endswith('.png'):
+                    ext = '.png'
+                elif target_rel.target_ref.endswith('.jpg') or target_rel.target_ref.endswith('.jpeg'):
+                    ext = '.jpg'
+                elif target_rel.target_ref.endswith('.gif'):
+                    ext = '.gif'
+                elif target_rel.target_ref.endswith('.bmp'):
+                    ext = '.bmp'
+                else:
+                    ext = '.png'  # 默认扩展名
+                
+                # 生成图片文件名，添加image_id前缀
+                image_filename = f"{doc_name}_image_id____image{image_counter}{ext}"
+                image_path = os.path.join(output_dir, image_filename)
+                
+                # 保存图片
+                with open(image_path, 'wb') as f:
+                    f.write(image_data)
+                
+                # 记录图片信息
+                image_info[f"image_{image_counter}"] = {
+                    "filename": image_filename,
+                    "caption": caption
+                }
+                
+                print(f"提取图片: {image_filename}")
+                if caption:
+                    print(f"  图片标题: {caption}")
+                
+                image_counter += 1
     
     return image_info
+
+
+def create_enhanced_image_chunk_content(filename: str, target_section: str, caption: str) -> str:
+    """
+    创建增强的图片chunk内容
+    
+    参数:
+        filename: 图片文件名
+        target_section: 目标章节路径
+        caption: 图片标题/描述
+        
+    返回:
+        格式化的图片chunk内容
+    """
+    # 提取纯文字内容（去掉数字）
+    clean_caption = ""
+    if caption:
+        # 使用正则表达式提取中文字符和英文字母，去掉数字和特殊符号
+        import re
+        clean_caption = re.sub(r'[\d\.\-\s]+', '', caption).strip()
+        if clean_caption:
+            clean_caption = f"图片内容：{clean_caption}"
+    
+    # 构建增强的chunk内容
+    content_parts = [
+        f"图片名称：{filename}",
+        f"图片所在SOP位置：{target_section}"
+    ]
+    
+    if clean_caption:
+        content_parts.append(clean_caption)
+    
+    return "\n".join(content_parts)
 
 
 def find_image_references_in_text(text: str) -> List[str]:
@@ -414,6 +460,27 @@ def process_sop_document_with_images(docx_path: str, output_dir: str = "output")
     # 首先提取图片及其caption
     print("正在提取图片及其标题...")
     image_info = extract_images_with_captions_from_docx(docx_path)
+    
+    # 创建按文档顺序排列的图片列表
+    ordered_images = []
+    for image_id, info in image_info.items():
+        # 从image_id中提取数字部分作为索引
+        match = re.search(r'image_?(\d+)', image_id)
+        if match:
+            index = int(match.group(1))
+            ordered_images.append({
+                'index': index,
+                'id': image_id,
+                'filename': info['filename'],
+                'caption': info.get('caption', ''),
+                'used': False  # 标记是否已使用
+            })
+        else:
+            print(f"警告: 无法从image_id '{image_id}' 中提取数字索引")
+    
+    # 按index排序，确保按文档顺序处理
+    ordered_images.sort(key=lambda x: x['index'])
+    print(f"图片按文档顺序排列: {[img['index'] for img in ordered_images]}")
     print(f"成功提取 {len(image_info)} 张图片")
     
     # 创建简单的图片映射（向后兼容）
@@ -511,13 +578,15 @@ def process_sop_document_with_images(docx_path: str, output_dir: str = "output")
             table_position_section[table_index] = " > ".join(temp_heading_stack)
             table_index += 1
 
-    # 遍历文档的所有段落和表格
-    # 首先处理所有段落
-    for paragraph in doc.paragraphs:
+    # 使用iter_block_items来按文档顺序处理所有内容（段落、表格、图片）
+    for block in iter_block_items(doc):
+        if isinstance(block, Paragraph):
+            paragraph = block
         if is_heading_paragraph(paragraph):
             # 如果该标题文本与任一图片caption完全一致，则视为图片标题，不作为新小节切分
             # 直接跳过（不写入buffer，不改变heading_stack），图片会在后处理阶段插入到对应小节末尾
             if paragraph.text.strip() in caption_set:
+                # 这是一个图片标题，跳过处理（图片会在对应的文本chunk处理时插入）
                 continue
             # 这是一个标题
             heading_text = paragraph.text.strip()
@@ -607,6 +676,7 @@ def process_sop_document_with_images(docx_path: str, output_dir: str = "output")
                         'image_filename': image_filename,
                         'image_section_path': image_section_path
                     })
+                    
                 current_content_buffer = []
             
             # 更新标题栈
@@ -723,229 +793,58 @@ def process_sop_document_with_images(docx_path: str, output_dir: str = "output")
     
     print(f"总共处理了 {len(chunks)} 个知识块")
     
-    # 后处理：基于图片caption重新分配图片到正确的章节
+    # 后处理：将所有图片按顺序添加到chunks末尾
     print("\n开始后处理图片分配...")
     
-    # 基于图片caption进行智能分配
-    for img_id, img_data in image_info.items():
-        caption = img_data["caption"]
-        filename = img_data["filename"]
+    # 为所有图片创建chunk，按顺序添加到chunks列表的末尾
+    for img_data in ordered_images:
+        # 根据caption内容智能分配section
+        caption = img_data['caption']
+        assigned_section = "未知章节"
         
         if caption:
-            print(f"处理图片: {filename}, 标题: {caption}")
-            
-            # 根据caption内容查找匹配的章节
-            target_chunk = None
-            best_match_score = 0
-            
-            # 特殊处理：根据caption内容分配到正确的章节
-            if "隔离" in caption or "opl" in caption.lower():
-                # 图片2：隔离酒OPL -> 7.4.3章节
+            # 尝试从caption中提取数字前缀
+            caption_match = re.match(r'^(\d+(?:\.\d+)*)', caption)
+            if caption_match:
+                caption_prefix = caption_match.group(1)
+                # 查找匹配的section
                 for chunk in chunks:
-                    if "7.4.3" in chunk.get('section_path', '') and "隔离" in chunk.get('text', ''):
-                        target_chunk = chunk
-                        best_match_score = 10  # 高优先级
-                        break
-            elif "图片 1" in caption:
-                # 图片1 -> 第2小节（2.适用范围）
-                for chunk in chunks:
-                    if "2.适用范围" in chunk.get('section_path', ''):
-                        target_chunk = chunk
-                        best_match_score = 10  # 高优先级
-                        break
-            elif "图片 2" in caption:
-                # 图片2 -> 7.4.3章节
-                for chunk in chunks:
-                    if "7.4.3" in chunk.get('section_path', '') and "隔离" in chunk.get('text', ''):
-                        target_chunk = chunk
-                        best_match_score = 10  # 高优先级
+                    chunk_section = chunk.get('section_path', '')
+                    if chunk_section and chunk_section.startswith(caption_prefix):
+                        assigned_section = chunk_section
                         break
             else:
-                # 其他图片的常规匹配逻辑
-                for chunk in chunks:
-                    chunk_text = chunk.get('text', '')
-                    section_path = chunk.get('section_path', '')
-                    
-                    # 计算匹配分数
-                    match_score = 0
-                    
-                    # 检查caption中的关键词是否在chunk文本中出现
-                    caption_keywords = caption.lower().split()
-                    for keyword in caption_keywords:
-                        if keyword in chunk_text.lower():
-                            match_score += 1
-                    
-                    # 特殊处理：如果caption包含"表"等关键词
-                    if "表" in caption and "表" in chunk_text:
-                        match_score += 2
-                    
-                    # 如果匹配分数更高，更新目标chunk
-                    if match_score > best_match_score:
-                        best_match_score = match_score
-                        target_chunk = chunk
-            
-            # 如果找到匹配的chunk，分配图片
-            if target_chunk and best_match_score > 0:
-                # 将图片作为独立chunk插入到其对应的大纲前缀块（如 5.1）的最后位置之后
-                target_section = target_chunk['section_path']
-                prefix_match = re.match(r'^(\d+(?:\.\d+)?)', target_section or "")
-                section_prefix = prefix_match.group(1) if prefix_match else target_section
-                insert_after = max(
-                    (i for i, c in enumerate(chunks) if c.get('section_path', '').startswith(section_prefix)),
-                    default=len(chunks)-1
-                )
-                image_chunk = {
-                    'chunk': f"{target_section}\n\n[图片]\n{filename}",
-                    'sop_id': sop_id,
-                    'sop_name': sop_name,
-                    'section_path': target_section,
-                    'image_filename': filename,
-                    'image_section_path': target_section
-                }
-                chunks.insert(insert_after + 1, image_chunk)
-                image_section_mapping[filename] = target_section
-                print(f"  插入图片chunk到: {target_section} (匹配分数: {best_match_score})")
-            else:
-                print(f"  未找到匹配的章节，使用默认分配")
-                # 如果没有找到匹配的章节，将图片分配到7.4.3章节
-                for i, chunk in enumerate(chunks):
-                    if "7.4.3" in chunk.get('section_path', '') and "隔离" in chunk.get('text', ''):
-                        target_section = chunk['section_path']
-                        prefix_match = re.match(r'^(\d+(?:\.\d+)?)', target_section or "")
-                        section_prefix = prefix_match.group(1) if prefix_match else target_section
-                        insert_after = max(
-                            (j for j, c in enumerate(chunks) if c.get('section_path', '').startswith(section_prefix)),
-                            default=i
-                        )
-                        image_chunk = {
-                            'chunk': f"{target_section}\n\n[图片]\n{filename}",
-                            'sop_id': sop_id,
-                            'sop_name': sop_name,
-                            'section_path': target_section,
-                            'image_filename': filename,
-                            'image_section_path': target_section
-                        }
-                        chunks.insert(insert_after + 1, image_chunk)
-                        image_section_mapping[filename] = target_section
-                        print(f"  默认插入图片chunk到: {target_section}")
-                        break
-        else:
-            print(f"处理图片: {filename} (无标题)")
-    
-    # 清除所有chunk中的图片分配，然后重新分配
-    for chunk in chunks:
-        if chunk.get('image_filename'):
-            chunk['image_filename'] = ""
-    
-    # 重新分配图片到正确的章节
-    for image_id, info in image_info.items():
-        filename = info["filename"]
-        caption = info.get("caption", "")
+                # 如果没有数字前缀，尝试根据关键词匹配
+                if '霉斑' in caption or '磨花' in caption or '特脏' in caption or '破损' in caption or '不干胶' in caption or '塑料标签' in caption or '瓶口缺陷' in caption or '假标签' in caption or '喷码' in caption or '标签' in caption:
+                    assigned_section = "5.3不可接收-不合格（附图例）"
+                elif '塑箱' in caption or '铁丝' in caption or '焊接' in caption:
+                    assigned_section = "5.4不可接收的回收塑箱质量标准（附图例）"
+                elif '扎啤桶' in caption or '改装' in caption or '变形' in caption or '瓶阀' in caption:
+                    assigned_section = "5.5不可接收的扎啤桶质量标准（附图例）"
+                elif '配送模式' in caption:
+                    assigned_section = "9.配送模式下的经销商可回收包装物回收管理流程及说明"
+                elif '自提模式' in caption:
+                    assigned_section = "10. 自提模式下的经销商可回收包装物回收管理流程及说明："
         
-        # 特殊处理：特定caption模式
-        if "图片 1" in caption:
-            # 图片1 -> 2.适用范围
-            for chunk in chunks:
-                if "2.适用范围" in chunk.get('section_path', '') and "图片 1" in chunk.get('text', ''):
-                    # 插入独立图片chunk到该section前缀块的末尾
-                    target_section = chunk['section_path']
-                    prefix_match = re.match(r'^(\d+(?:\.\d+)?)', target_section or "")
-                    section_prefix = prefix_match.group(1) if prefix_match else target_section
-                    insert_after = max(
-                        (i for i, c in enumerate(chunks) if c.get('section_path', '').startswith(section_prefix)),
-                        default=len(chunks)-1
-                    )
-                    chunks.insert(insert_after + 1, {
-                        'chunk': f"{target_section}\n\n[图片]\n{filename}",
-                        'sop_id': sop_id,
-                        'sop_name': sop_name,
-                        'section_path': target_section,
-                        'image_filename': filename
-                    })
-                    break
-        elif "图片 2" in caption or "隔离" in caption or "opl" in caption.lower():
-            # 图片2 -> 7.4.3章节
-            for chunk in chunks:
-                if "7.4.3" in chunk.get('section_path', '') and "隔离" in chunk.get('text', ''):
-                    target_section = chunk['section_path']
-                    prefix_match = re.match(r'^(\d+(?:\.\d+)?)', target_section or "")
-                    section_prefix = prefix_match.group(1) if prefix_match else target_section
-                    insert_after = max(
-                        (i for i, c in enumerate(chunks) if c.get('section_path', '').startswith(section_prefix)),
-                        default=len(chunks)-1
-                    )
-                    chunks.insert(insert_after + 1, {
-                        'chunk': f"{target_section}\n\n[图片]\n{filename}",
-                        'sop_id': sop_id,
-                        'sop_name': sop_name,
-                        'section_path': target_section,
-                        'image_filename': filename
-                    })
-                    break
-        else:
-            # 通用处理：基于caption内容匹配章节
-            target_chunk = None
-            best_match_score = 0
-            
-            # 提取caption中的关键词
-            caption_keywords = []
-            numbers = []  # 初始化numbers变量
-            if caption:
-                # 提取数字和关键词
-                numbers = re.findall(r'\d+\.?\d*', caption)
-                keywords = re.findall(r'[a-zA-Z\u4e00-\u9fff]+', caption)
-                caption_keywords = numbers + keywords
-            
-            # 在chunks中寻找最佳匹配
-            for chunk in chunks:
-                chunk_text = chunk.get('text', '')
-                chunk_section = chunk.get('section_path', '')
-                
-                match_score = 0
-                
-                # 检查caption是否在section_path中
-                if caption and caption in chunk_section:
-                    match_score += 10
-                
-                # 检查关键词匹配
-                for keyword in caption_keywords:
-                    if keyword in chunk_text or keyword in chunk_section:
-                        match_score += 1
-                
-                # 检查caption中的数字是否在section_path中
-                for num in numbers:
-                    if num in chunk_section:
-                        match_score += 2
-                
-                if match_score > best_match_score:
-                    best_match_score = match_score
-                    target_chunk = chunk
-            
-            # 如果找到匹配的chunk，插入独立图片chunk到该section前缀块末尾
-            if target_chunk and best_match_score > 0:
-                target_section = target_chunk['section_path']
-                prefix_match = re.match(r'^(\d+(?:\.\d+)?)', target_section or "")
-                section_prefix = prefix_match.group(1) if prefix_match else target_section
-                insert_after = max(
-                    (i for i, c in enumerate(chunks) if c.get('section_path', '').startswith(section_prefix)),
-                    default=len(chunks)-1
-                )
-                chunks.insert(insert_after + 1, {
-                    'chunk': f"{target_section}\n\n[图片]\n{filename}",
-                    'sop_id': sop_id,
-                    'sop_name': sop_name,
-                    'section_path': target_section,
-                    'image_filename': filename
-                })
-                print(f"  后处理插入图片chunk: {filename} -> {target_section} (匹配分数: {best_match_score})")
-            else:
-                print(f"  警告: 无法为图片 {filename} 找到匹配的章节")
+        # 创建图片chunk
+        enhanced_content = create_enhanced_image_chunk_content(
+            img_data['filename'], 
+            assigned_section, 
+            img_data['caption']
+        )
+        
+        chunks.append({
+            'chunk': enhanced_content,
+            'sop_id': sop_id,
+            'sop_name': sop_name,
+            'section_path': assigned_section,
+            'image_filename': img_data['filename'],
+            'image_section_path': assigned_section
+        })
+        
+        print(f"添加图片: {img_data['filename']} -> {assigned_section}")
     
-    # 输出图片与section_path的映射信息
-    if image_section_mapping:
-        print("\n图片与章节映射:")
-        for image_file, section_path in image_section_mapping.items():
-            print(f"  {image_file} -> {section_path}")
+    print(f"图片chunk处理完成，共处理 {len(chunks)} 个chunks")
     
     # 保存到CSV文件
     if not chunks:
@@ -959,11 +858,11 @@ def process_sop_document_with_images(docx_path: str, output_dir: str = "output")
     base_name = os.path.splitext(os.path.basename(docx_path))[0]
     output_file = os.path.join(output_dir, f"{base_name}_processed_with_images.csv")
     
-    # 转换为DataFrame并保存
+    # 转换为DataFrame并保存，只保留chunk列
     df = pd.DataFrame(chunks)
-    # 删除image_section_path列（如果存在）
-    if 'image_section_path' in df.columns:
-        df = df.drop('image_section_path', axis=1)
+    # 只保留chunk列，删除其他所有列
+    if 'chunk' in df.columns:
+        df = df[['chunk']]
     df.to_csv(output_file, index=False, encoding='utf-8-sig', quoting=1)
     
     print(f"成功保存到: {output_file}")
@@ -983,8 +882,10 @@ def main():
         print(f"错误: 文件 '{docx_path}' 不存在")
         sys.exit(1)
     
-    # 处理文档
-    result = process_sop_document_with_images(docx_path, "output")
+    # 处理文档，使用绝对路径
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    output_dir = os.path.join(script_dir, "output")
+    result = process_sop_document_with_images(docx_path, output_dir)
     
     if not result:
         print("处理失败，未生成任何知识块")

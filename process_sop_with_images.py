@@ -889,6 +889,7 @@ def process_sop_document_with_images(docx_path: str, output_dir: str = "output")
             
             # 提取caption中的关键词
             caption_keywords = []
+            numbers = []  # 初始化numbers变量
             if caption:
                 # 提取数字和关键词
                 numbers = re.findall(r'\d+\.?\d*', caption)

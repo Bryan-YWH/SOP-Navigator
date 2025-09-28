@@ -582,124 +582,124 @@ def process_sop_document_with_images(docx_path: str, output_dir: str = "output")
     for block in iter_block_items(doc):
         if isinstance(block, Paragraph):
             paragraph = block
-        if is_heading_paragraph(paragraph):
-            # 如果该标题文本与任一图片caption完全一致，则视为图片标题，不作为新小节切分
-            # 直接跳过（不写入buffer，不改变heading_stack），图片会在后处理阶段插入到对应小节末尾
-            if paragraph.text.strip() in caption_set:
-                # 这是一个图片标题，跳过处理（图片会在对应的文本chunk处理时插入）
-                continue
-            # 这是一个标题
-            heading_text = paragraph.text.strip()
-            heading_level = get_heading_level(paragraph)
-            # 为无编号标题自动分配编号，并与已有编号保持同步
-            number_match = re.match(r'^(\d+(?:\.\d+)*)', heading_text)
-            if number_match:
-                # 同步计数器为显式编号
-                explicit_numbers = [int(n) for n in number_match.group(1).split('.') if n.isdigit()]
-                # 调整计数器长度
-                heading_counters = explicit_numbers.copy()
-            else:
-                # 基于层级生成自动编号
-                # 确保计数器长度与层级一致
-                if len(heading_counters) < heading_level:
-                    heading_counters += [0] * (heading_level - len(heading_counters))
+            if is_heading_paragraph(paragraph):
+                # 如果该标题文本与任一图片caption完全一致，则视为图片标题，不作为新小节切分
+                # 直接跳过（不写入buffer，不改变heading_stack），图片会在后处理阶段插入到对应小节末尾
+                if paragraph.text.strip() in caption_set:
+                    # 这是一个图片标题，跳过处理（图片会在对应的文本chunk处理时插入）
+                    continue
+                # 这是一个标题
+                heading_text = paragraph.text.strip()
+                heading_level = get_heading_level(paragraph)
+                # 为无编号标题自动分配编号，并与已有编号保持同步
+                number_match = re.match(r'^(\d+(?:\.\d+)*)', heading_text)
+                if number_match:
+                    # 同步计数器为显式编号
+                    explicit_numbers = [int(n) for n in number_match.group(1).split('.') if n.isdigit()]
+                    # 调整计数器长度
+                    heading_counters = explicit_numbers.copy()
                 else:
-                    heading_counters = heading_counters[:heading_level]
-                # 当前层级自增，深层级清零隐含在截断中
-                if not heading_counters:
-                    heading_counters = [1]
-                else:
-                    heading_counters[-1] += 1
-                number_str = '.'.join(str(x) for x in heading_counters)
-                # 规范化标题展示：数字与标题之间加空格（如 1. 目的 / 5.1 成品酒入库检查）
-                if not heading_text:
-                    heading_text = number_str + ('.' if heading_level == 1 else '')
-                elif re.match(r'^\d', heading_text):
-                    # 已有数字（少见），保持原样
-                    pass
-                else:
-                    # 如果子层级（例如5.1 标题），自动添加空格
-                    if heading_level == 1:
-                        heading_text = f"{number_str}. {heading_text}"
+                    # 基于层级生成自动编号
+                    # 确保计数器长度与层级一致
+                    if len(heading_counters) < heading_level:
+                        heading_counters += [0] * (heading_level - len(heading_counters))
                     else:
-                        heading_text = f"{number_str} {heading_text}"
-            
-            # 如果有收集的内容，先处理之前的内容（包括上一个标题和其内容）
-            if current_content_buffer:
-                section_path = build_section_path(heading_stack)
-                combined_text = normalize_list_symbols('\n'.join(current_content_buffer))
-                # 优先使用chunk首行的数字标题作为section_path，以避免父级错绑
-                if combined_text.strip():
-                    first_line = combined_text.split('\n', 1)[0].strip()
-                    if re.match(r'^\d+(?:\.\d+)*(?:\.)?\s*.+', first_line):
-                        section_path = first_line
-                
-                # 智能分配图片：优先分配给有图片引用的内容
-                image_filename = ""
-                image_section_path = ""
-                image_refs = find_image_references_in_text(combined_text)
-                
-                # 特殊处理：检查是否应该将图片分配给7.4.3章节
-                should_assign_to_743 = False
-                if "隔离" in combined_text and "7.4" in section_path:
-                    should_assign_to_743 = True
-                
-                if image_refs and pending_images:
-                    # 有图片引用，分配第一张待分配图片
-                    image_filename = pending_images.pop(0)
-                    if should_assign_to_743:
-                        image_section_path = "7.活动描述 > 7.4不合格品管理 > 7.4.3当班班长接收隔离完成后，当班邮件反馈隔离信息，通知QA人员现场张贴隔离单，QA邮件反馈隔离信息；（隔离单上应包含隔离数量、品种、批次，隔离原因及隔离人，严格执行隔离四要素；隔离四要素请参考《隔离酒OPL》及《品质隔离标准VPO QUAL WH 3 4 1 002 隔离酒操作.docx》；"
+                        heading_counters = heading_counters[:heading_level]
+                    # 当前层级自增，深层级清零隐含在截断中
+                    if not heading_counters:
+                        heading_counters = [1]
                     else:
-                        image_section_path = identify_image_section(combined_text, section_path)
-                    image_section_mapping[image_filename] = image_section_path
-                    print(f"图片关联: {image_filename} -> {image_section_path} (基于图片引用)")
-                elif pending_images and should_assign_to_743:
-                    # 特殊处理：将图片分配给7.4.3章节
-                    image_filename = pending_images.pop(0)
-                    image_section_path = "7.活动描述 > 7.4不合格品管理 > 7.4.3当班班长接收隔离完成后，当班邮件反馈隔离信息，通知QA人员现场张贴隔离单，QA邮件反馈隔离信息；（隔离单上应包含隔离数量、品种、批次，隔离原因及隔离人，严格执行隔离四要素；隔离四要素请参考《隔离酒OPL》及《品质隔离标准VPO QUAL WH 3 4 1 002 隔离酒操作.docx》；"
-                    image_section_mapping[image_filename] = image_section_path
-                    print(f"图片关联: {image_filename} -> {image_section_path} (特殊分配7.4.3)")
-                elif pending_images and len(pending_images) <= 2:
-                    # 如果图片不多，按顺序分配给有内容的小节
-                    image_filename = pending_images.pop(0)
-                    image_section_path = identify_image_section(combined_text, section_path)
-                    image_section_mapping[image_filename] = image_section_path
-                    print(f"图片关联: {image_filename} -> {image_section_path} (按顺序分配)")
+                        heading_counters[-1] += 1
+                    number_str = '.'.join(str(x) for x in heading_counters)
+                    # 规范化标题展示：数字与标题之间加空格（如 1. 目的 / 5.1 成品酒入库检查）
+                    if not heading_text:
+                        heading_text = number_str + ('.' if heading_level == 1 else '')
+                    elif re.match(r'^\d', heading_text):
+                        # 已有数字（少见），保持原样
+                        pass
+                    else:
+                        # 如果子层级（例如5.1 标题），自动添加空格
+                        if heading_level == 1:
+                            heading_text = f"{number_str}. {heading_text}"
+                        else:
+                            heading_text = f"{number_str} {heading_text}"
                 
-                # 跳过文档开头的总标题等无章节内容（无section_path时不落盘）
-                if section_path:
-                    chunks.append({
-                        'chunk': combined_text,
-                        'sop_id': sop_id,
-                        'sop_name': sop_name,
-                        'section_path': section_path,
-                        'image_filename': image_filename,
-                        'image_section_path': image_section_path
-                    })
+                # 如果有收集的内容，先处理之前的内容（包括上一个标题和其内容）
+                if current_content_buffer:
+                    section_path = build_section_path(heading_stack)
+                    combined_text = normalize_list_symbols('\n'.join(current_content_buffer))
+                    # 优先使用chunk首行的数字标题作为section_path，以避免父级错绑
+                    if combined_text.strip():
+                        first_line = combined_text.split('\n', 1)[0].strip()
+                        if re.match(r'^\d+(?:\.\d+)*(?:\.)?\s*.+', first_line):
+                            section_path = first_line
                     
-                current_content_buffer = []
-            
-            # 更新标题栈
-            # 移除同级及更深层级的标题
-            heading_stack = [h for h in heading_stack if heading_stack.index(h) < heading_level - 1]
-            
-            # 添加新标题
-            if len(heading_stack) >= heading_level:
-                heading_stack = heading_stack[:heading_level-1]
-            heading_stack.append(heading_text)
-            
-            # 更新当前标题文本
-            current_heading_text = heading_text
-            
-            # 将新标题添加到内容缓冲区，作为新小节内容的开始
-            current_content_buffer.append(heading_text)
-            
-            print(f"处理标题: {heading_text} (层级: {heading_level})")
-            
-        else:
-            # 这是一个普通段落
-            if paragraph.text.strip():
-                current_content_buffer.append(paragraph.text.strip())
+                    # 智能分配图片：优先分配给有图片引用的内容
+                    image_filename = ""
+                    image_section_path = ""
+                    image_refs = find_image_references_in_text(combined_text)
+                    
+                    # 特殊处理：检查是否应该将图片分配给7.4.3章节
+                    should_assign_to_743 = False
+                    if "隔离" in combined_text and "7.4" in section_path:
+                        should_assign_to_743 = True
+                    
+                    if image_refs and pending_images:
+                        # 有图片引用，分配第一张待分配图片
+                        image_filename = pending_images.pop(0)
+                        if should_assign_to_743:
+                            image_section_path = "7.活动描述 > 7.4不合格品管理 > 7.4.3当班班长接收隔离完成后，当班邮件反馈隔离信息，通知QA人员现场张贴隔离单，QA邮件反馈隔离信息；（隔离单上应包含隔离数量、品种、批次，隔离原因及隔离人，严格执行隔离四要素；隔离四要素请参考《隔离酒OPL》及《品质隔离标准VPO QUAL WH 3 4 1 002 隔离酒操作.docx》；"
+                        else:
+                            image_section_path = identify_image_section(combined_text, section_path)
+                        image_section_mapping[image_filename] = image_section_path
+                        print(f"图片关联: {image_filename} -> {image_section_path} (基于图片引用)")
+                    elif pending_images and should_assign_to_743:
+                        # 特殊处理：将图片分配给7.4.3章节
+                        image_filename = pending_images.pop(0)
+                        image_section_path = "7.活动描述 > 7.4不合格品管理 > 7.4.3当班班长接收隔离完成后，当班邮件反馈隔离信息，通知QA人员现场张贴隔离单，QA邮件反馈隔离信息；（隔离单上应包含隔离数量、品种、批次，隔离原因及隔离人，严格执行隔离四要素；隔离四要素请参考《隔离酒OPL》及《品质隔离标准VPO QUAL WH 3 4 1 002 隔离酒操作.docx》；"
+                        image_section_mapping[image_filename] = image_section_path
+                        print(f"图片关联: {image_filename} -> {image_section_path} (特殊分配7.4.3)")
+                    elif pending_images and len(pending_images) <= 2:
+                        # 如果图片不多，按顺序分配给有内容的小节
+                        image_filename = pending_images.pop(0)
+                        image_section_path = identify_image_section(combined_text, section_path)
+                        image_section_mapping[image_filename] = image_section_path
+                        print(f"图片关联: {image_filename} -> {image_section_path} (按顺序分配)")
+                    
+                    # 跳过文档开头的总标题等无章节内容（无section_path时不落盘）
+                    if section_path:
+                        chunks.append({
+                            'chunk': combined_text,
+                            'sop_id': sop_id,
+                            'sop_name': sop_name,
+                            'section_path': section_path,
+                            'image_filename': image_filename,
+                            'image_section_path': image_section_path
+                        })
+                        
+                    current_content_buffer = []
+                
+                # 更新标题栈
+                # 移除同级及更深层级的标题
+                heading_stack = [h for h in heading_stack if heading_stack.index(h) < heading_level - 1]
+                
+                # 添加新标题
+                if len(heading_stack) >= heading_level:
+                    heading_stack = heading_stack[:heading_level-1]
+                heading_stack.append(heading_text)
+                
+                # 更新当前标题文本
+                current_heading_text = heading_text
+                
+                # 将新标题添加到内容缓冲区，作为新小节内容的开始
+                current_content_buffer.append(heading_text)
+                
+                print(f"处理标题: {heading_text} (层级: {heading_level})")
+                
+            else:
+                # 这是一个普通段落
+                if paragraph.text.strip():
+                    current_content_buffer.append(paragraph.text.strip())
     
     # 处理最后收集的内容
     if current_content_buffer:
@@ -793,58 +793,68 @@ def process_sop_document_with_images(docx_path: str, output_dir: str = "output")
     
     print(f"总共处理了 {len(chunks)} 个知识块")
     
-    # 后处理：将所有图片按顺序添加到chunks末尾
-    print("\n开始后处理图片分配...")
+    # 后处理：将图片嵌入到对应的文本chunk中
+    print("\n开始后处理图片嵌入...")
     
-    # 为所有图片创建chunk，按顺序添加到chunks列表的末尾
-    for img_data in ordered_images:
-        # 根据caption内容智能分配section
-        caption = img_data['caption']
-        assigned_section = "未知章节"
-        
-        if caption:
-            # 尝试从caption中提取数字前缀
-            caption_match = re.match(r'^(\d+(?:\.\d+)*)', caption)
-            if caption_match:
-                caption_prefix = caption_match.group(1)
-                # 查找匹配的section
-                for chunk in chunks:
-                    chunk_section = chunk.get('section_path', '')
-                    if chunk_section and chunk_section.startswith(caption_prefix):
-                        assigned_section = chunk_section
-                        break
-            else:
-                # 如果没有数字前缀，尝试根据关键词匹配
-                if '霉斑' in caption or '磨花' in caption or '特脏' in caption or '破损' in caption or '不干胶' in caption or '塑料标签' in caption or '瓶口缺陷' in caption or '假标签' in caption or '喷码' in caption or '标签' in caption:
-                    assigned_section = "5.3不可接收-不合格（附图例）"
-                elif '塑箱' in caption or '铁丝' in caption or '焊接' in caption:
-                    assigned_section = "5.4不可接收的回收塑箱质量标准（附图例）"
-                elif '扎啤桶' in caption or '改装' in caption or '变形' in caption or '瓶阀' in caption:
-                    assigned_section = "5.5不可接收的扎啤桶质量标准（附图例）"
-                elif '配送模式' in caption:
-                    assigned_section = "9.配送模式下的经销商可回收包装物回收管理流程及说明"
-                elif '自提模式' in caption:
-                    assigned_section = "10. 自提模式下的经销商可回收包装物回收管理流程及说明："
-        
-        # 创建图片chunk
-        enhanced_content = create_enhanced_image_chunk_content(
-            img_data['filename'], 
-            assigned_section, 
-            img_data['caption']
-        )
-        
-        chunks.append({
-            'chunk': enhanced_content,
-            'sop_id': sop_id,
-            'sop_name': sop_name,
-            'section_path': assigned_section,
-            'image_filename': img_data['filename'],
-            'image_section_path': assigned_section
-        })
-        
-        print(f"添加图片: {img_data['filename']} -> {assigned_section}")
+    # 为每个chunk分配对应的图片
+    for chunk in chunks:
+        chunk_section = chunk.get('section_path', '')
+        if chunk_section:
+            # 查找属于这个section的图片
+            section_images = []
+            for img_data in ordered_images:
+                if not img_data.get('used', False):
+                    caption = img_data['caption']
+                    assigned_section = "未知章节"
+                    
+                    if caption:
+                        # 尝试从caption中提取数字前缀
+                        caption_match = re.match(r'^(\d+(?:\.\d+)*)', caption)
+                        if caption_match:
+                            caption_prefix = caption_match.group(1)
+                            # 检查是否匹配当前chunk的section
+                            if chunk_section.startswith(caption_prefix):
+                                assigned_section = chunk_section
+                        else:
+                            # 如果没有数字前缀，尝试根据关键词匹配
+                            if '霉斑' in caption or '磨花' in caption or '特脏' in caption or '破损' in caption or '不干胶' in caption or '塑料标签' in caption or '瓶口缺陷' in caption or '假标签' in caption or '喷码' in caption or '标签' in caption:
+                                if "5.3不可接收-不合格" in chunk_section:
+                                    assigned_section = chunk_section
+                            elif '塑箱' in caption or '铁丝' in caption or '焊接' in caption:
+                                if "5.4不可接收的回收塑箱" in chunk_section:
+                                    assigned_section = chunk_section
+                            elif '扎啤桶' in caption or '改装' in caption or '变形' in caption or '瓶阀' in caption:
+                                if "5.5不可接收的扎啤桶" in chunk_section:
+                                    assigned_section = chunk_section
+                            elif '配送模式' in caption:
+                                if "9.配送模式" in chunk_section:
+                                    assigned_section = chunk_section
+                            elif '自提模式' in caption:
+                                if "10. 自提模式" in chunk_section:
+                                    assigned_section = chunk_section
+                    
+                    if assigned_section == chunk_section:
+                        section_images.append(img_data)
+            
+            # 如果有图片属于这个section，将它们嵌入到chunk中
+            if section_images:
+                original_content = chunk['chunk']
+                image_content = ""
+                
+                for img_data in section_images:
+                    enhanced_content = create_enhanced_image_chunk_content(
+                        img_data['filename'], 
+                        chunk_section, 
+                        img_data['caption']
+                    )
+                    image_content += "\n\n" + enhanced_content
+                    img_data['used'] = True
+                    print(f"嵌入图片到chunk: {img_data['filename']} -> {chunk_section}")
+                
+                # 将图片内容添加到原始chunk内容后面
+                chunk['chunk'] = original_content + image_content
     
-    print(f"图片chunk处理完成，共处理 {len(chunks)} 个chunks")
+    print(f"图片嵌入处理完成，共处理 {len(chunks)} 个chunks")
     
     # 保存到CSV文件
     if not chunks:

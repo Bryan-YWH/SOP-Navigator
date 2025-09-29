@@ -51,6 +51,7 @@ def batch_process_annotated_documents():
         
         try:
             # 处理文档
+            # 输出CSV到 output_dir，图片提取由处理函数内部固定到 sop_images
             result = process_sop_document_with_images(str(docx_path), str(output_dir))
             
             if result:
